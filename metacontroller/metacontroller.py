@@ -16,6 +16,7 @@ from einops.layers.torch import Rearrange
 
 from x_transformers import Decoder
 from x_mlps_pytorch import Feedforwards
+from x_evolution import EvoStrategy
 
 from discrete_continuous_embed_readout import Embed, Readout
 
@@ -33,8 +34,11 @@ def exists(v):
 def identity(t):
     return t
 
-def default(v, d):
-    return v if exists(v) else d
+def default(*args):
+    for arg in args:
+        if exists(arg):
+            return arg
+    return None
 
 # meta controller
 
@@ -71,6 +75,9 @@ class MetaController(Module):
         )
 
         self.to_hyper_network_weights = Rearrange('... (two d r) -> two ... d r', two = 2, r = hypernetwork_low_rank)
+
+    def internal_rl_parameters(self):
+        return self.parameters()
 
     def forward(
         self,
@@ -116,7 +123,8 @@ class Transformer(Module):
         embed: Embed | dict,
         lower_body: Decoder | dict,
         upper_body: Decoder | dict,
-        readout: Readout | dict
+        readout: Readout | dict,
+        meta_controller: MetaController | None = None
     ):
         super().__init__()
 
@@ -137,12 +145,34 @@ class Transformer(Module):
         self.upper_body = upper_body
         self.readout = readout
 
+        # meta controller
+
+        self.meta_controller = meta_controller
+
+    def evolve(
+        self,
+        environment,
+        **kwargs
+    ):
+        assert exists(self.meta_controller), '`meta_controller` must be defined on init for evolutionary strategies to be straightforwardly applied'
+
+        evo_strat = EvoStrategy(
+            self,
+            environment = environment,
+            params_to_optimize = self.meta_controller.internal_rl.parameters(),
+            **kwargs
+        )
+
+        evo_strat()
+
     def forward(
         self,
         ids,
-        meta_controller: Module = Identity(),
+        meta_controller: Module | None = None,
         return_latents = False
     ):
+        meta_controller = default(meta_controller, self.meta_controller, Identity())
+
         embed = self.embed(ids)
 
         latents = self.lower_body(embed)
