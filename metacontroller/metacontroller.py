@@ -113,9 +113,7 @@ class MetaController(Module):
     def internal_rl_parameters(self):
         return [
             *self.action_proposer.parameters(),
-            *self.action_proposer_mean_log_var.parameters(),
-            *self.decoder.parameters(),
-            *self.switch_gating
+            *self.action_proposer_mean_log_var.parameters()
         ]
 
     def forward(
@@ -231,13 +229,15 @@ class Transformer(Module):
 
     def evolve(
         self,
+        num_generations,
         environment,
         **kwargs
     ):
-        assert exists(self.meta_controller), '`meta_controller` must be defined on init for evolutionary strategies to be straightforwardly applied'
+        assert exists(self.meta_controller), '`meta_controller` must be passed in or defined on init for evolutionary strategies to be straightforwardly applied'
 
         evo_strat = EvoStrategy(
             self,
+            num_generations = num_generations,
             environment = environment,
             params_to_optimize = self.meta_controller.internal_rl_parameters(),
             **kwargs

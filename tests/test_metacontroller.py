@@ -29,3 +29,6 @@ def test_metacontroller(
     logits = model(ids, meta_controller = meta_controller, discovery_phase = discovery_phase)
 
     assert logits.shape == (1, 1024, 256)
+
+    model.meta_controller = meta_controller
+    model.evolve(1, lambda _: 1., noise_population_size = 2)
