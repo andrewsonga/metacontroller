@@ -1,4 +1,6 @@
 from __future__ import annotations
+from contextlib import nullcontext
+
 from functools import partial
 from collections import namedtuple
 
@@ -250,26 +252,50 @@ class Transformer(Module):
         ids,
         meta_controller: Module | None = None,
         discovery_phase = False,
-        return_latents = False
+        return_latents = False,
+        no_grad_transformer = None,
+        no_grad_meta_controller = None
     ):
         meta_controller = default(meta_controller, self.meta_controller)
 
-        embed = self.embed(ids)
+        meta_controlling = exists(meta_controller)
 
-        residual_stream = self.lower_body(embed)
+        # by default, if meta controller is passed in, transformer is no grad
+
+        no_grad_transformer = default(no_grad_transformer, meta_controlling)
+        no_grad_meta_controller = default(no_grad_meta_controller, no_grad_transformer) # by default, if transformer is eval no grad then meta controller is being learnt
+
+        transformer_context = torch.no_grad if no_grad_transformer else nullcontext
+        meta_controller_context = torch.no_grad if no_grad_meta_controller else nullcontext
+
+        # transformer lower body
+
+        with transformer_context():
+
+            embed = self.embed(ids)
+
+            residual_stream = self.lower_body(embed)
 
         # meta controller acts on residual stream here
 
-        if exists(meta_controller):
-            modified_residual_stream, action_dist, sampled_action, vae_aux_loss = meta_controller(residual_stream, discovery_phase = discovery_phase)
-        else:
-            modified_residual_stream, action_dist, sampled_action, vae_aux_loss = residual_stream, None, None, self.zero
+        with meta_controller_context():
 
-        # modified residual stream sent back
+            if exists(meta_controller):
+                modified_residual_stream, action_dist, sampled_action, vae_aux_loss = meta_controller(residual_stream, discovery_phase = discovery_phase)
+            else:
+                modified_residual_stream, action_dist, sampled_action, vae_aux_loss = residual_stream, None, None, self.zero
 
-        attended = self.upper_body(modified_residual_stream)
+        # modified residual stream sent back to transformer upper body
 
-        dist_params = self.readout(attended)
+        with transformer_context():
+
+            attended = self.upper_body(modified_residual_stream)
+
+            # head readout
+
+            dist_params = self.readout(attended)
+
+        # returning
 
         if not return_latents:
             return dist_params
