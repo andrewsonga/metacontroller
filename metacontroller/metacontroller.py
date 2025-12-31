@@ -3,6 +3,7 @@ from contextlib import nullcontext
 
 from functools import partial
 from collections import namedtuple
+from loguru import logger
 
 import torch
 from torch import nn, cat, stack, tensor
@@ -130,7 +131,8 @@ class MetaController(Module):
         residual_stream,
         cache: MetaControllerOutput | None = None,
         discovery_phase = False,
-        hard_switch = False
+        hard_switch = False,
+        temperature = 1.
     ):
 
         # destruct prev cache
@@ -142,6 +144,8 @@ class MetaController(Module):
         next_action_proposer_hidden = None
 
         if discovery_phase:
+            logger.warning('meta controller cache being passed back in for discovery phase, which does not make sense given bidirectional encoder')
+
             temporal_compressed, _ = self.bidirectional_temporal_compressor(residual_stream)
             temporal_compressed = reduce(temporal_compressed, '... (two d) -> ... d', 'mean', two = 2)
 
@@ -157,7 +161,7 @@ class MetaController(Module):
 
         action_dist = readout(proposed_action_hidden)
 
-        sampled_action = readout.sample(action_dist)
+        sampled_action = readout.sample(action_dist, temperature = temperature)
 
         # switching unit timer
 
@@ -287,8 +291,9 @@ class Transformer(Module):
         discovery_phase = False,
         no_grad_transformer = None,
         no_grad_meta_controller = None,
+        meta_controller_temperature = 1.,
         return_latents = False,
-        return_cache = False
+        return_cache = False,
     ):
         meta_controller = default(meta_controller, self.meta_controller)
 
@@ -319,7 +324,7 @@ class Transformer(Module):
         with meta_controller_context():
 
             if exists(meta_controller):
-                modified_residual_stream, next_meta_hiddens = meta_controller(residual_stream, cache = meta_hiddens, discovery_phase = discovery_phase)
+                modified_residual_stream, next_meta_hiddens = meta_controller(residual_stream, cache = meta_hiddens, discovery_phase = discovery_phase, temperature = meta_controller_temperature)
             else:
                 modified_residual_stream, next_meta_hiddens = residual_stream, None
 
