@@ -289,8 +289,6 @@ class Transformer(Module):
         meta_controller: Module | None = None,
         cache: TransformerOutput | None = None,
         discovery_phase = False,
-        no_grad_transformer = None,
-        no_grad_meta_controller = None,
         meta_controller_temperature = 1.,
         return_latents = False,
         return_cache = False,
@@ -301,11 +299,9 @@ class Transformer(Module):
 
         # by default, if meta controller is passed in, transformer is no grad
 
-        no_grad_transformer = default(no_grad_transformer, meta_controlling)
-        no_grad_meta_controller = default(no_grad_meta_controller, no_grad_transformer) # by default, if transformer is eval no grad then meta controller is being learnt
-
-        transformer_context = torch.no_grad if no_grad_transformer else nullcontext
-        meta_controller_context = torch.no_grad if no_grad_meta_controller else nullcontext
+        lower_transformer_context = nullcontext if not meta_controlling else torch.no_grad
+        meta_controller_context = nullcontext if meta_controlling else torch.no_grad
+        upper_transformer_context = nullcontext if meta_controlling and discovery_phase else torch.no_grad
 
         # handle cache
 
@@ -313,7 +309,7 @@ class Transformer(Module):
 
         # transformer lower body
 
-        with transformer_context():
+        with lower_transformer_context():
 
             embed = self.embed(ids)
 
@@ -330,7 +326,7 @@ class Transformer(Module):
 
         # modified residual stream sent back to transformer upper body
 
-        with transformer_context():
+        with upper_transformer_context():
 
             attended, next_upper_hiddens = self.upper_body(modified_residual_stream, cache = upper_transformer_hiddens, return_hiddens = True)
 
