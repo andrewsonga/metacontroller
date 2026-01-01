@@ -28,3 +28,15 @@ Implementation of the MetaController proposed in [Emergent temporal abstractions
     url     = {https://api.semanticscholar.org/CorpusID:279464702}
 }
 ```
+
+```bibtex
+@misc{fleuret2025freetransformer,
+    title     = {The Free Transformer}, 
+    author    = {François Fleuret},
+    year      = {2025},
+    eprint    = {2510.17558},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url       = {https://arxiv.org/abs/2510.17558}, 
+}
+```
