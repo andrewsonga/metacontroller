@@ -256,7 +256,7 @@ class Transformer(Module):
         super().__init__()
 
         if isinstance(lower_body, dict):
-            lower_body = Decoder(dim = dim, **lower_body)
+            lower_body = Decoder(dim = dim, pre_norm_has_final_norm = False, **lower_body)
 
         if isinstance(upper_body, dict):
             upper_body = Decoder(dim = dim, **upper_body)
