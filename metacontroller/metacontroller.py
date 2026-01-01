@@ -64,8 +64,10 @@ MetaControllerOutput = namedtuple('MetaControllerOutput', (
 class MetaController(Module):
     def __init__(
         self,
-        dim_latent,
+        dim_model,
         *,
+        dim_meta_controller = 256,
+        dim_latent = 128,
         switch_per_latent_dim = True,
         decoder_expansion_factor = 2.,
         decoder_depth = 1,
@@ -73,25 +75,30 @@ class MetaController(Module):
         assoc_scan_kwargs: dict = dict()
     ):
         super().__init__()
+        dim_meta = default(dim_meta_controller, dim_model)
+
+        # the linear that brings from model dimension 
+
+        self.model_to_meta = Linear(dim_model, dim_meta)
 
         # there are two phases, the first (discovery ssl phase) uses acausal with some ssm i don't really believe in - let's just use a bidirectional GRU as placeholders
 
-        self.bidirectional_temporal_compressor = GRU(dim_latent, dim_latent, bidirectional = True) # revisit naming
+        self.bidirectional_temporal_compressor = GRU(dim_meta, dim_meta, bidirectional = True) # revisit naming
 
-        self.emitter = GRU(dim_latent * 2, dim_latent * 2)
-        self.emitter_to_action_mean_log_var = Readout(dim_latent * 2, num_continuous = dim_latent)
+        self.emitter = GRU(dim_meta * 2, dim_meta * 2)
+        self.emitter_to_action_mean_log_var = Readout(dim_meta * 2, num_continuous = dim_latent)
 
         # internal rl phase substitutes the acausal + emitter with a causal ssm
 
-        self.action_proposer = GRU(dim_latent, dim_latent)
-        self.action_proposer_mean_log_var = Readout(dim_latent, num_continuous = dim_latent)
+        self.action_proposer = GRU(dim_meta, dim_meta)
+        self.action_proposer_mean_log_var = Readout(dim_meta, num_continuous = dim_latent)
 
         # switching unit
 
         self.switch_per_latent_dim = switch_per_latent_dim
 
-        self.switching_unit = GRU(dim_latent, dim_latent)
-        self.to_switching_unit_beta = nn.Linear(dim_latent, dim_latent if switch_per_latent_dim else 1, bias = False)
+        self.switching_unit = GRU(dim_meta, dim_meta)
+        self.to_switching_unit_beta = nn.Linear(dim_meta, dim_latent if switch_per_latent_dim else 1, bias = False)
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
 
@@ -105,7 +112,7 @@ class MetaController(Module):
             dim_in = dim_latent,
             dim = dim_decoder_hidden,
             depth = decoder_depth,
-            dim_out = 2 * hypernetwork_low_rank * dim_latent
+            dim_out = 2 * hypernetwork_low_rank * dim_model
         )
 
         self.to_hyper_network_weights = Rearrange('... (two d r) -> two ... d r', two = 2, r = hypernetwork_low_rank)
@@ -114,6 +121,7 @@ class MetaController(Module):
 
     def discovery_parameters(self):
         return [
+            *self.model_to_meta.parameters(),
             *self.bidirectional_temporal_compressor.parameters(),
             *self.emitter.parameters(),
             *self.emitter_to_action_mean_log_var.parameters(),
@@ -144,18 +152,20 @@ class MetaController(Module):
 
         next_action_proposer_hidden = None
 
+        meta_embed = self.model_to_meta(residual_stream)
+
         if discovery_phase:
             logger.warning('meta controller cache being passed back in for discovery phase, which does not make sense given bidirectional encoder')
 
-            temporal_compressed, _ = self.bidirectional_temporal_compressor(residual_stream)
+            temporal_compressed, _ = self.bidirectional_temporal_compressor(meta_embed)
             temporal_compressed = reduce(temporal_compressed, '... (two d) -> ... d', 'mean', two = 2)
 
-            proposed_action_hidden, _ = self.emitter(cat((temporal_compressed, residual_stream), dim = -1))
+            proposed_action_hidden, _ = self.emitter(cat((temporal_compressed, meta_embed), dim = -1))
             readout = self.emitter_to_action_mean_log_var
 
         else: # else internal rl phase
 
-            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(residual_stream, prev_action_proposer_hidden)
+            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(meta_embed, prev_action_proposer_hidden)
             readout = self.action_proposer_mean_log_var
 
         # sample from the gaussian as the action from the meta controller
@@ -168,7 +178,7 @@ class MetaController(Module):
 
         batch, _, dim = sampled_action.shape
 
-        switching_unit_gru_out, next_switching_unit_gru_hidden = self.switching_unit(residual_stream, prev_switching_unit_gru_hidden)
+        switching_unit_gru_out, next_switching_unit_gru_hidden = self.switching_unit(meta_embed, prev_switching_unit_gru_hidden)
 
         switch_beta = self.to_switching_unit_beta(switching_unit_gru_out).sigmoid()
 
@@ -213,9 +223,7 @@ class MetaController(Module):
 
         # generating the residual stream controlling signal
 
-        control_signal = einsum(gated_action, hypernetwork_weight, '... d1, ... d1 d2 -> ... d1')
-
-        modified_residual_stream = residual_stream + control_signal
+        control_signal = einsum(residual_stream, hypernetwork_weight, '... d1, ... d1 d2 -> ... d1')
 
         # returning
 
@@ -225,7 +233,7 @@ class MetaController(Module):
             next_switch_gated_action
         )
 
-        return modified_residual_stream, MetaControllerOutput(next_hiddens, action_dist, sampled_action, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, action_dist, sampled_action, kl_loss, switch_loss)
 
 # main transformer, which is subsumed into the environment after behavioral cloning
 
@@ -334,9 +342,11 @@ class Transformer(Module):
         with meta_controller_context():
 
             if exists(meta_controller):
-                modified_residual_stream, next_meta_hiddens = meta_controller(residual_stream, cache = meta_hiddens, discovery_phase = discovery_phase, temperature = meta_controller_temperature)
+                control_signal, next_meta_hiddens = meta_controller(residual_stream, cache = meta_hiddens, discovery_phase = discovery_phase, temperature = meta_controller_temperature)
             else:
-                modified_residual_stream, next_meta_hiddens = residual_stream, None
+                control_signal, next_meta_hiddens = self.zero, None
+
+            modified_residual_stream = residual_stream + control_signal
 
         # modified residual stream sent back to transformer upper body
 

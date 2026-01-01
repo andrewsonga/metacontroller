@@ -38,7 +38,9 @@ def test_metacontroller(
     # discovery and internal rl phase with meta controller
 
     meta_controller = MetaController(
-        dim_latent = 512,
+        dim_model = 512,
+        dim_meta_controller = 256,
+        dim_latent = 128,
         switch_per_latent_dim = switch_per_latent_dim
     )
 
