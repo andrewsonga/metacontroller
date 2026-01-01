@@ -29,6 +29,7 @@ dependencies = [
     "einx>=0.3.0",
     "einops>=0.8.1",
     "loguru",
+    "memmap-replay-buffer>=0.0.1",
     "torch>=2.5",
     "x-evolution>=0.1.23",
     "x-mlps-pytorch",
