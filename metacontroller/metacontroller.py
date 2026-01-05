@@ -101,7 +101,9 @@ class MetaController(Module):
 
         self.switch_per_latent_dim = switch_per_latent_dim
 
-        self.switching_unit = GRU(dim_meta, dim_meta)
+
+        self.dim_latent = dim_latent
+        self.switching_unit = GRU(dim_meta + dim_latent, dim_meta)
         self.to_switching_unit_beta = nn.Linear(dim_meta, dim_latent if switch_per_latent_dim else 1, bias = False)
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
@@ -181,7 +183,31 @@ class MetaController(Module):
 
         batch, _, dim = sampled_action.shape
 
-        switching_unit_gru_out, next_switching_unit_gru_hidden = self.switching_unit(meta_embed, prev_switching_unit_gru_hidden)
+        batch, seq_len, _ = meta_embed.shape
+        if discovery_phase:
+            # shift the proposed actions to the right to simulate "previous"
+            z_prev = torch.cat([
+                torch.zeros_like(sampled_action[:, :1]), 
+                sampled_action[:, :-1]
+            ], dim=1)
+        else:
+            # In inference, we fetch the actual previous z from the cache
+            if exists(prev_switch_gated_hiddens):
+                z_prev = prev_switch_gated_hiddens
+                # Ensure z_prev has sequence dimension (Batch, 1, Dim)
+                if z_prev.ndim == 2:
+                    z_prev = z_prev.unsqueeze(1)
+            else:
+                # initialize with zeros 
+                batch, _, _ = meta_embed.shape
+                z_prev = torch.zeros(batch, seq_len, self.dim_latent, device=meta_embed.device)
+
+        switch_input = torch.cat((meta_embed, z_prev), dim=-1)
+
+        switching_unit_gru_out, next_switching_unit_gru_hidden = self.switching_unit(
+            switch_input, 
+            prev_switching_unit_gru_hidden
+        )
 
         switch_beta = self.to_switching_unit_beta(switching_unit_gru_out).sigmoid()
 
