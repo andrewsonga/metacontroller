@@ -35,12 +35,13 @@ def divisible_by(num, den):
 # main
 
 def main(
-    env_name = 'MiniGrid-FourRooms-v0',
+    env_name = 'BabyAI-BossLevel-v0',
     num_episodes = int(10e6),
     max_timesteps = 500,
     buffer_size = 5_000,
     render_every_eps = 1_000,
-    video_folder = './recordings'
+    video_folder = './recordings',
+    seed = None
 ):
 
     # environment
@@ -76,7 +77,7 @@ def main(
 
     for _ in tqdm(range(num_episodes)):
 
-        state, *_ = env.reset()
+        state, *_ = env.reset(seed = seed)
 
         for _ in range(max_timesteps):
 
