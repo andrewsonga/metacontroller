@@ -50,3 +50,5 @@ $ pip install metacontroller-pytorch
     url       = {https://arxiv.org/abs/2510.17558}, 
 }
 ```
+
+*Life can only be understood backwards; but it must be lived forwards* - Søren Kierkegaard
