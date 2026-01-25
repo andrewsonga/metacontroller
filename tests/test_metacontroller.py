@@ -10,12 +10,15 @@ from einops import rearrange
 
 @param('action_discrete', (False, True))
 @param('switch_per_latent_dim', (False, True))
+@param('variable_length', (False, True))
 def test_metacontroller(
     action_discrete,
-    switch_per_latent_dim
+    switch_per_latent_dim,
+    variable_length
 ):
 
     state = torch.randn(1, 1024, 384)
+    episode_lens = torch.tensor([512]) if variable_length else None
 
     if action_discrete:
         actions = torch.randint(0, 4, (1, 1024))
@@ -36,7 +39,7 @@ def test_metacontroller(
         upper_body = dict(depth = 2,),
     )
 
-    state_clone_loss, action_clone_loss = model(state, actions)
+    state_clone_loss, action_clone_loss = model(state, actions, episode_lens = episode_lens)
     (state_clone_loss + 0.5 * action_clone_loss).backward()
 
     # discovery and internal rl phase with meta controller

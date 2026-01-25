@@ -26,7 +26,7 @@ from discrete_continuous_embed_readout import Embed, Readout, EmbedAndReadout
 
 from assoc_scan import AssocScan
 
-from torch_einops_utils import pad_at_dim
+from torch_einops_utils import pad_at_dim, lens_to_mask
 from torch_einops_utils.save_load import save_load
 
 # constants
@@ -335,6 +335,7 @@ class Transformer(Module):
         return_raw_action_dist = False,
         return_latents = False,
         return_cache = False,
+        episode_lens: Tensor | None = None
     ):
         device = state.device
 
@@ -361,6 +362,9 @@ class Transformer(Module):
 
             state, target_state = state[:, :-1], state[:, 1:]
             actions, target_actions = actions[:, :-1], actions[:, 1:]
+
+            if exists(episode_lens):
+                episode_lens = (episode_lens - 1).clamp(min = 0)
 
         # transformer lower body
 
@@ -406,10 +410,14 @@ class Transformer(Module):
         # maybe return behavior cloning loss
 
         if behavioral_cloning:
-            state_dist_params = self.state_readout(attended)
-            state_clone_loss = self.state_readout.calculate_loss(state_dist_params, target_state)
+            loss_mask = None
+            if exists(episode_lens):
+                loss_mask = lens_to_mask(episode_lens, state.shape[1])
 
-            action_clone_loss = self.action_readout.calculate_loss(dist_params, target_actions)
+            state_dist_params = self.state_readout(attended)
+            state_clone_loss = self.state_readout.calculate_loss(state_dist_params, target_state, mask = loss_mask)
+
+            action_clone_loss = self.action_readout.calculate_loss(dist_params, target_actions, mask = loss_mask)
 
             return state_clone_loss, action_clone_loss
 
