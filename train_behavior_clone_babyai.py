@@ -26,7 +26,7 @@ from memmap_replay_buffer import ReplayBuffer
 from einops import rearrange
 
 from metacontroller.metacontroller import Transformer
-from metacontroller.metacontroller_with_resnet import TransformerWithResnetEncoder
+from metacontroller.transformer_with_resnet import TransformerWithResnet
 
 import minigrid
 import gymnasium as gym
@@ -95,7 +95,7 @@ def train(
 
     # transformer
     
-    transformer_class = TransformerWithResnetEncoder if use_resnet else Transformer
+    transformer_class = TransformerWithResnet if use_resnet else Transformer
     model = transformer_class(
         dim = dim,
         state_embed_readout = dict(num_continuous = state_dim),
