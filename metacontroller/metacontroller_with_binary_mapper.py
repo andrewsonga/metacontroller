@@ -74,6 +74,9 @@ class MetaControllerWithBinaryMapper(Module):
         kl_loss_threshold = 0.
     ):
         super().__init__()
+
+        assert not switch_per_code, 'switch_per_code is not supported for binary mapper'
+
         dim_meta = default(dim_meta_controller, dim_model)
 
         self.model_to_meta = Linear(dim_model, dim_meta)
