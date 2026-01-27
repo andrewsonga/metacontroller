@@ -61,6 +61,7 @@ MetaControllerOutput = namedtuple('MetaControllerOutput', (
     'input_residual_stream',
     'action_dist',
     'actions',
+    'switch_beta',
     'kl_loss',
     'switch_loss'
 ))
@@ -151,7 +152,7 @@ class MetaController(Module):
         residual_stream,
         cache: MetaControllerOutput | None = None,
         discovery_phase = False,
-        hard_switch = False,
+        hard_switch = None,
         temperature = 1.,
         episode_lens: Tensor | None = None
     ):
@@ -166,6 +167,8 @@ class MetaController(Module):
         next_action_proposer_hidden = None
 
         meta_embed = self.model_to_meta(residual_stream)
+
+        hard_switch = default(hard_switch, not discovery_phase) # think during internal RL phase, it needs to be a hard switch, then only the actions emitted during the switch is reinforced
 
         if discovery_phase:
             logger.warning('meta controller cache being passed back in for discovery phase, which does not make sense given bidirectional encoder')
@@ -269,7 +272,7 @@ class MetaController(Module):
             sampled_latent_action[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss, switch_loss)
 
 # main transformer, which is subsumed into the environment after behavioral cloning
 

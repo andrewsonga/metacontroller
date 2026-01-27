@@ -28,6 +28,8 @@ from torch_einops_utils.save_load import save_load
 
 from vector_quantize_pytorch import BinaryMapper
 
+from metacontroller.metacontroller import MetaControllerOutput
+
 # constants
 
 LinearNoBias = partial(Linear, bias = False)
@@ -49,15 +51,6 @@ def straight_through(src, tgt):
     return tgt + src - src.detach()
 
 # meta controller
-
-MetaControllerOutput = namedtuple('MetaControllerOutput', (
-    'prev_hiddens',
-    'input_residual_stream',
-    'action_dist',
-    'codes',
-    'kl_loss',
-    'switch_loss'
-))
 
 @save_load()
 class MetaControllerWithBinaryMapper(Module):
@@ -149,7 +142,7 @@ class MetaControllerWithBinaryMapper(Module):
         residual_stream,
         cache: MetaControllerOutput | None = None,
         discovery_phase = False,
-        hard_switch = False,
+        hard_switch = None,
         temperature = 1.,
         episode_lens: Tensor | None = None
     ):
@@ -164,6 +157,8 @@ class MetaControllerWithBinaryMapper(Module):
         next_action_proposer_hidden = None
 
         meta_embed = self.model_to_meta(residual_stream)
+
+        hard_switch = default(hard_switch, not discovery_phase) # think during internal RL phase, it needs to be a hard switch, then only the actions emitted during the switch is reinforced
 
         if discovery_phase:
             mask = maybe(lens_to_mask)(episode_lens, meta_embed.shape[1])
@@ -266,4 +261,4 @@ class MetaControllerWithBinaryMapper(Module):
             sampled_codes[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss, switch_loss)
