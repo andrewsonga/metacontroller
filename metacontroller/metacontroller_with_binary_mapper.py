@@ -52,6 +52,7 @@ def straight_through(src, tgt):
 
 MetaControllerOutput = namedtuple('MetaControllerOutput', (
     'prev_hiddens',
+    'input_residual_stream',
     'action_dist',
     'codes',
     'kl_loss',
@@ -265,4 +266,4 @@ class MetaControllerWithBinaryMapper(Module):
             sampled_codes[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, binary_logits, sampled_codes, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, kl_loss, switch_loss)

@@ -58,6 +58,7 @@ def straight_through(src, tgt):
 
 MetaControllerOutput = namedtuple('MetaControllerOutput', (
     'prev_hiddens',
+    'input_residual_stream',
     'action_dist',
     'actions',
     'kl_loss',
@@ -268,7 +269,7 @@ class MetaController(Module):
             sampled_latent_action[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, action_dist, sampled_latent_action, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, kl_loss, switch_loss)
 
 # main transformer, which is subsumed into the environment after behavioral cloning
 

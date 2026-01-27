@@ -59,7 +59,7 @@ def test_metacontroller(
             dim_model = 512,
             dim_meta_controller = 256,
             switch_per_code = switch_per_latent_dim,
-            dim_code_bits = 8, # 2**8 = 256 codes
+            dim_code_bits = 8, # 2 ** 8 = 256 codes
         )
 
     # discovery phase
