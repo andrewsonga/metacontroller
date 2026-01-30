@@ -1,5 +1,11 @@
 replay-data/
 recordings/
+trajectories/
+wandb/
+checkpoints/
+*.sh
+*.out
+*.slurm
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

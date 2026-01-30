@@ -18,7 +18,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 import torch
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
@@ -31,14 +31,19 @@ from metacontroller.transformer_with_resnet import TransformerWithResnet
 import minigrid
 import gymnasium as gym
 
+# TODO: loss is still ~300 and it could be the resnet output?
+# TODO: changelog (paper hparams, checkpointing, difficulty levels in trajectory collection)
+
 def train(
     input_dir = "babyai-minibosslevel-trajectories",
     env_id = "BabyAI-MiniBossLevel-v0",
     cloning_epochs = 10,
     discovery_epochs = 10,
-    batch_size = 32,
+    batch_size = 1024,
     lr = 1e-4,
     discovery_lr = 1e-4,
+    weight_decay = 0.03,
+    discovery_weight_decay = 0.03,
     dim = 512,
     depth = 2,
     heads = 8,
@@ -47,6 +52,7 @@ def train(
     wandb_project = "metacontroller-babyai-bc",
     checkpoint_path = "transformer_bc.pt",
     meta_controller_checkpoint_path = "meta_controller_discovery.pt",
+    save_steps = 50,
     state_loss_weight = 1.,
     action_loss_weight = 1.,
     discovery_action_recon_loss_weight = 1.,
@@ -55,6 +61,22 @@ def train(
     max_grad_norm = 1.,
     use_resnet = False
 ):
+
+    def store_checkpoint(step:int):
+        if accelerator.is_main_process:
+
+            # Add step to checkpoint filenames
+            checkpoint_path_with_step = checkpoint_path.replace('.pt', f'_step_{step}.pt')
+            meta_controller_checkpoint_path_with_step = meta_controller_checkpoint_path.replace('.pt', f'_step_{step}.pt')
+
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.save(checkpoint_path_with_step)
+
+            unwrapped_meta_controller = accelerator.unwrap_model(meta_controller)
+            unwrapped_meta_controller.save(meta_controller_checkpoint_path_with_step)
+
+            accelerator.print(f"Model saved to {checkpoint_path_with_step}, MetaController to {meta_controller_checkpoint_path_with_step}")
+
     # accelerator
 
     accelerator = Accelerator(log_with = "wandb" if use_wandb else None)
@@ -117,9 +139,9 @@ def train(
 
     # optimizer
 
-    optim_model = Adam(model.parameters(), lr = lr)
+    optim_model = AdamW(model.parameters(), lr = lr, weight_decay = weight_decay)
 
-    optim_meta_controller = Adam(meta_controller.discovery_parameters(), lr = discovery_lr)
+    optim_meta_controller = AdamW(meta_controller.discovery_parameters(), lr = discovery_lr, weight_decay = discovery_weight_decay)
 
     # prepare
 
@@ -127,6 +149,7 @@ def train(
 
     # training
 
+    gradient_step = 0
     for epoch in range(cloning_epochs + discovery_epochs):
 
         model.train()
@@ -153,6 +176,7 @@ def train(
                 states = model.visual_encode(states)
             else: # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
                 states = rearrange(states, 'b t ... -> b t (...)')
+
 
             with accelerator.accumulate(model):
                 losses = model(
@@ -211,23 +235,21 @@ def train(
             })
 
             progress_bar.set_postfix(**log)
+            gradient_step += 1
+
+            # checkpoint 
+
+            if gradient_step % save_steps == 0:
+                accelerator.wait_for_everyone()
+                store_checkpoint(gradient_step)
 
         avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
         avg_losses_str = ", ".join([f"{k}={v:.4f}" for k, v in avg_losses.items()])
         accelerator.print(f"Epoch {epoch}: {avg_losses_str}")
 
     # save weights
-
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save(checkpoint_path)
-
-        unwrapped_meta_controller = accelerator.unwrap_model(meta_controller)
-        unwrapped_meta_controller.save(meta_controller_checkpoint_path)
-
-        accelerator.print(f"Model saved to {checkpoint_path}, MetaController to {meta_controller_checkpoint_path}")
+    store_checkpoint(gradient_step)
 
     accelerator.end_training()
 
