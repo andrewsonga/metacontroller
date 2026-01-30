@@ -336,6 +336,8 @@ class MetaController(Module):
 
         return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss, switch_loss)
 
+MetaController.policy_loss = policy_loss
+
 # main transformer, which is subsumed into the environment after behavioral cloning
 
 Hiddens = namedtuple('Hiddens', (
@@ -414,17 +416,21 @@ class Transformer(Module):
     ):
         device = state.device
 
+        # meta controller is either given or already given at init
+
         meta_controller = default(meta_controller, self.meta_controller)
 
-        meta_controlling = exists(meta_controller)
+        has_meta_controller = exists(meta_controller)
 
-        behavioral_cloning = not meta_controlling and not return_raw_action_dist
+        assert not (discovery_phase and not has_meta_controller), 'meta controller must be made available during discovery phase'
+
+        behavioral_cloning = not has_meta_controller and not return_raw_action_dist
 
         # by default, if meta controller is passed in, transformer is no grad
 
-        lower_transformer_context = nullcontext if not meta_controlling else torch.no_grad
-        meta_controller_context = nullcontext if meta_controlling else torch.no_grad
-        upper_transformer_context = nullcontext if (not meta_controlling or discovery_phase) else torch.no_grad
+        lower_transformer_context = nullcontext if not has_meta_controller else torch.no_grad
+        meta_controller_context = nullcontext if has_meta_controller else torch.no_grad
+        upper_transformer_context = nullcontext if (not has_meta_controller or discovery_phase) else torch.no_grad
 
         # handle cache
 
@@ -432,7 +438,8 @@ class Transformer(Module):
 
         # handle maybe behavioral cloning
 
-        if behavioral_cloning or (meta_controlling and discovery_phase):
+        if behavioral_cloning or discovery_phase: # during behavior cloning and discovery phase, the network is predicting / reconstructing the next token
+
             assert exists(actions), f'`actions` cannot be empty when doing discovery or behavioral cloning'
 
             state, target_state = state[:, :-1], state[:, 1:]
@@ -495,7 +502,7 @@ class Transformer(Module):
 
             return state_clone_loss, action_clone_loss
 
-        elif meta_controlling and discovery_phase:
+        elif discovery_phase:
 
             action_recon_loss = self.action_readout.calculate_loss(dist_params, target_actions)
 

@@ -28,7 +28,7 @@ from torch_einops_utils.save_load import save_load
 
 from vector_quantize_pytorch import BinaryMapper
 
-from metacontroller.metacontroller import MetaControllerOutput
+from metacontroller.metacontroller import MetaControllerOutput, policy_loss
 
 # constants
 
@@ -302,3 +302,5 @@ class MetaControllerWithBinaryMapper(Module):
             switch_beta = rearrange(switch_beta, '... 1 -> ...')
 
         return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss, switch_loss)
+
+MetaControllerWithBinaryMapper.policy_loss = policy_loss

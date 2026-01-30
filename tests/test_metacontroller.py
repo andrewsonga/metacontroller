@@ -182,8 +182,7 @@ def test_metacontroller(
 
     batch = next(iter(dl))
 
-    loss = policy_loss(
-        meta_controller,
+    loss = meta_controller.policy_loss(
         batch['states'],
         batch['log_probs'],
         batch['latent_actions'],

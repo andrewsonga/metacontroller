@@ -25,29 +25,35 @@ from accelerate import Accelerator
 from memmap_replay_buffer import ReplayBuffer
 from einops import rearrange
 
-from metacontroller.metacontroller import Transformer
+from metacontroller.metacontroller import Transformer, MetaController
 from metacontroller.transformer_with_resnet import TransformerWithResnet
 
 import minigrid
 import gymnasium as gym
 
 def train(
-    input_dir: str = "babyai-minibosslevel-trajectories",
-    env_id: str = "BabyAI-MiniBossLevel-v0",
-    cloning_epochs: int = 10,
-    discovery_epochs: int = 10,
-    batch_size: int = 32,
-    lr: float = 1e-4,
-    dim: int = 512,
-    depth: int = 2,
-    heads: int = 8,
-    dim_head: int = 64,
-    use_wandb: bool = False,
-    wandb_project: str = "metacontroller-babyai-bc",
-    checkpoint_path: str = "transformer_bc.pt",
-    state_loss_weight: float = 1.,
-    action_loss_weight: float = 1.,
-    use_resnet: bool = False
+    input_dir = "babyai-minibosslevel-trajectories",
+    env_id = "BabyAI-MiniBossLevel-v0",
+    cloning_epochs = 10,
+    discovery_epochs = 10,
+    batch_size = 32,
+    lr = 1e-4,
+    discovery_lr = 1e-4,
+    dim = 512,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    use_wandb = False,
+    wandb_project = "metacontroller-babyai-bc",
+    checkpoint_path = "transformer_bc.pt",
+    meta_controller_checkpoint_path = "meta_controller_discovery.pt",
+    state_loss_weight = 1.,
+    action_loss_weight = 1.,
+    discovery_action_recon_loss_weight = 1.,
+    discovery_kl_loss_weight = 1.,
+    discovery_switch_loss_weight = 1.,
+    max_grad_norm = 1.,
+    use_resnet = False
 ):
     # accelerator
 
@@ -96,6 +102,7 @@ def train(
     # transformer
     
     transformer_class = TransformerWithResnet if use_resnet else Transformer
+
     model = transformer_class(
         dim = dim,
         state_embed_readout = dict(num_continuous = state_dim),
@@ -104,22 +111,33 @@ def train(
         upper_body = dict(depth = depth, heads = heads, attn_dim_head = dim_head)
     )
 
+    # meta controller
+
+    meta_controller = MetaController(dim)
+
     # optimizer
 
-    optim = Adam(model.parameters(), lr = lr)
+    optim_model = Adam(model.parameters(), lr = lr)
+
+    optim_meta_controller = Adam(meta_controller.discovery_parameters(), lr = discovery_lr)
 
     # prepare
 
-    model, optim, dataloader = accelerator.prepare(model, optim, dataloader)
+    model, optim_model, optim_meta_controller, dataloader = accelerator.prepare(model, optim_model, optim_meta_controller, dataloader)
 
     # training
+
     for epoch in range(cloning_epochs + discovery_epochs):
+
         model.train()
         total_state_loss = 0.
         total_action_loss = 0.
 
         progress_bar = tqdm(dataloader, desc = f"Epoch {epoch}", disable = not accelerator.is_local_main_process)
+
         is_discovering = (epoch >= cloning_epochs) # discovery phase is BC with metacontroller tuning
+
+        optim = optim_model if not is_discovering else optim_meta_controller
 
         for batch in progress_bar:
             # batch is a NamedTuple (e.g. MemoryMappedBatch)
@@ -130,18 +148,53 @@ def train(
             episode_lens = batch.get('_lens')
 
             # use resnet18 to embed visual observations
+
             if use_resnet: 
                 states = model.visual_encode(states)
             else: # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
                 states = rearrange(states, 'b t ... -> b t (...)')
 
             with accelerator.accumulate(model):
-                state_loss, action_loss = model(states, actions, episode_lens = episode_lens, discovery_phase=is_discovering)
-                loss = state_loss * state_loss_weight + action_loss * action_loss_weight
+                losses = model(
+                    states,
+                    actions,
+                    episode_lens = episode_lens,
+                    discovery_phase = is_discovering,
+                    meta_controller = meta_controller if is_discovering else None
+                )
+
+                if is_discovering:
+                    action_recon_loss, kl_loss, switch_loss = losses
+
+                    loss = (
+                        action_recon_loss * discovery_action_recon_loss_weight +
+                        kl_loss * discovery_kl_loss_weight +
+                        switch_loss * discovery_switch_loss_weight
+                    )
+
+                    log = dict(
+                        action_recon_loss = action_recon_loss.item(),
+                        kl_loss = kl_loss.item(),
+                        switch_loss = switch_loss.item()
+                    )
+                else:
+                    state_loss, action_loss = losses
+
+                    loss = (
+                        state_loss * state_loss_weight +
+                        action_loss * action_loss_weight
+                    )
+
+                    log = dict(
+                        state_loss = state_loss.item(),
+                        action_loss = action_loss.item(),
+                    )
+
+                # backprop
 
                 accelerator.backward(loss)
 
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm = max_grad_norm)
 
                 optim.step()
                 optim.zero_grad()
@@ -152,8 +205,7 @@ def train(
             total_action_loss += action_loss.item()
 
             accelerator.log({
-                "state_loss": state_loss.item(),
-                "action_loss": action_loss.item(),
+                **log,
                 "total_loss": loss.item(),
                 "grad_norm": grad_norm.item()
             })
@@ -172,9 +224,14 @@ def train(
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save(checkpoint_path)
-        accelerator.print(f"Model saved to {checkpoint_path}")
+
+        unwrapped_meta_controller = accelerator.unwrap_model(meta_controller)
+        unwrapped_meta_controller.save(meta_controller_checkpoint_path)
+
+        accelerator.print(f"Model saved to {checkpoint_path}, MetaControler to {meta_controller_checkpoint_path}")
 
     accelerator.end_training()
 
