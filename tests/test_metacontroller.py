@@ -69,24 +69,12 @@ def test_metacontroller(
             dim_latent = 128,
             switch_per_latent_dim = switch_per_latent_dim
         )
-
-        field_shapes = dict(
-            log_probs = ('float', 128),
-            switch_betas = ('float', 128 if switch_per_latent_dim else 1),
-            latent_actions = ('float', 128)
-        )
     else:
         meta_controller = MetaControllerWithBinaryMapper(
             dim_model = 512,
             dim_meta_controller = 256,
             switch_per_code = switch_per_latent_dim,
             dim_code_bits = 8, # 2 ** 8 = 256 codes
-        )
-
-        field_shapes = dict(
-            log_probs = ('float', 8),
-            switch_betas = ('float', 8 if switch_per_latent_dim else 1),
-            latent_actions = ('float', 256)
         )
 
     # discovery phase
@@ -104,10 +92,7 @@ def test_metacontroller(
         test_folder,
         max_episodes = 3,
         max_timesteps = 256,
-        fields = dict(
-            states = ('float', 512),
-            **field_shapes
-        ),
+        fields = meta_controller.replay_buffer_field_dict,
         meta_fields = dict(
             advantages = 'float'
         )

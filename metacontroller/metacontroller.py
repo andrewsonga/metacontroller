@@ -126,6 +126,7 @@ class MetaController(Module):
         )
     ):
         super().__init__()
+        self.dim_model = dim_model
         dim_meta = default(dim_meta_controller, dim_model)
 
         # the linear that brings from model dimension 
@@ -170,6 +171,15 @@ class MetaController(Module):
         self.to_hyper_network_weights = Rearrange('... (two d r) -> two ... d r', two = 2, r = hypernetwork_low_rank)
 
         self.register_buffer('zero', tensor(0.), persistent = False)
+
+    @property
+    def replay_buffer_field_dict(self):
+        return dict(
+            states = ('float', self.dim_model),
+            log_probs = ('float', self.dim_latent),
+            switch_betas = ('float', self.dim_latent if self.switch_per_latent_dim else 1),
+            latent_actions = ('float', self.dim_latent)
+        )
 
     def discovery_parameters(self):
         return [

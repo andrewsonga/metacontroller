@@ -74,7 +74,7 @@ class MetaControllerWithBinaryMapper(Module):
         kl_loss_threshold = 0.
     ):
         super().__init__()
-
+        self.dim_model = dim_model
         assert not switch_per_code, 'switch_per_code is not supported for binary mapper'
 
         dim_meta = default(dim_meta_controller, dim_model)
@@ -125,6 +125,15 @@ class MetaControllerWithBinaryMapper(Module):
         self.to_hyper_network_weights = Rearrange('... (two d r) -> two ... d r', two = 2, r = hypernetwork_low_rank)
 
         self.register_buffer('zero', tensor(0.), persistent = False)
+
+    @property
+    def replay_buffer_field_dict(self):
+        return dict(
+            states = ('float', self.dim_model),
+            log_probs = ('float', self.dim_code_bits),
+            switch_betas = ('float', self.num_codes if self.switch_per_code else 1),
+            latent_actions = ('float', self.num_codes)
+        )
 
     def discovery_parameters(self):
         return [
