@@ -114,13 +114,14 @@ def test_metacontroller(
         for one_state in subset_state.unbind(dim = 1):
             one_state = rearrange(one_state, 'b d -> b 1 d')
 
-            logits, cache = model(one_state, past_action_id, meta_controller = meta_controller, return_cache = True)
+            logits, cache = model(one_state, past_action_id, meta_controller = meta_controller, cache = cache, return_cache = True)
 
             past_action_id = model.action_readout.sample(logits)
 
             # extract grpo data and store
 
-            grpo_data_list.append(extract_grpo_data(meta_controller, cache))
+            grpo_data = extract_grpo_data(meta_controller, cache)
+            grpo_data_list.append(grpo_data)
 
         # accumulate across time for the episode data
 
@@ -145,6 +146,13 @@ def test_metacontroller(
     # simulate a policy loss update over the entire group
 
     group_states, group_log_probs, group_switch_betas, group_latent_actions = map(partial(cat, dim = 0), zip(*all_episodes))
+    
+    # parallel verification
+
+    parallel_action_dist = meta_controller.get_action_dist_for_internal_rl(group_states)
+    parallel_log_probs = meta_controller.log_prob(parallel_action_dist, group_latent_actions)
+
+    assert torch.allclose(parallel_log_probs, group_log_probs, atol = 1e-5), 'parallel log probs do not match stored log probs'
 
     for states, log_probs, switch_betas, latent_actions, advantages in zip(group_states, group_log_probs, group_switch_betas, group_latent_actions, group_advantages):
         replay_buffer.store_episode(
