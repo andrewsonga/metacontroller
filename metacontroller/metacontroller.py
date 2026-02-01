@@ -66,6 +66,13 @@ MetaControllerOutput = namedtuple('MetaControllerOutput', (
     'switch_loss'
 ))
 
+GRPOOutput = namedtuple('GRPOOutput', (
+    'state',
+    'action',
+    'log_prob',
+    'switch_beta'
+))
+
 def z_score(t, eps = 1e-8):
     return (t - t.mean()) / (t.std() + eps)
 
@@ -106,6 +113,17 @@ def policy_loss(
         mask = mask & episode_mask
 
     return masked_mean(losses, mask)
+
+def extract_grpo_data(meta_controller, transformer_output):
+    meta_output = transformer_output.prev_hiddens.meta_controller
+
+    state = meta_output.input_residual_stream
+    action = meta_output.actions
+    switch_beta = meta_output.switch_beta
+
+    log_prob = meta_controller.log_prob(meta_output.action_dist, action)
+
+    return GRPOOutput(state, action, log_prob, switch_beta)
 
 @save_load()
 class MetaController(Module):
@@ -273,7 +291,7 @@ class MetaController(Module):
         else:
             # else during inference, use the previous sampled latent action
 
-            assert seq_len == 1, f'inference RL phase must be done one token at a time'
+            assert seq_len == 1, 'inference RL phase must be done one token at a time - if replaying for policy optimization, please use `get_action_dist_for_internal_rl`'
             z_prev = prev_sampled_latent_action
 
         # switch input is previous latent action and the embedding
@@ -395,7 +413,7 @@ class Transformer(Module):
 
         # ensure devices match
         
-        if self.meta_controller is not None: self._ensure_consistent_device(self.meta_controller)
+        if exists(self.meta_controller): self._ensure_consistent_device(self.meta_controller)
 
     def _ensure_consistent_device(self, network):
         self.model_device = next(self.parameters()).device
@@ -438,7 +456,7 @@ class Transformer(Module):
 
         # meta controller is either given or already given at init
 
-        if meta_controller is not None: self._ensure_consistent_device(self.meta_controller)
+        if exists(meta_controller): self._ensure_consistent_device(meta_controller)
 
         meta_controller = default(meta_controller, self.meta_controller)
 

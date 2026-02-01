@@ -7,7 +7,7 @@ from functools import partial
 
 import torch
 from torch import cat
-from metacontroller.metacontroller import Transformer, MetaController, policy_loss, z_score
+from metacontroller.metacontroller import Transformer, MetaController, policy_loss, z_score, extract_grpo_data
 from metacontroller.metacontroller_with_binary_mapper import MetaControllerWithBinaryMapper
 
 from memmap_replay_buffer import ReplayBuffer
@@ -109,36 +109,29 @@ def test_metacontroller(
         cache = None
         past_action_id = None
 
-        states = []
-        log_probs = []
-        switch_betas = []
-        latent_actions = []
+        grpo_data_list = []
 
         for one_state in subset_state.unbind(dim = 1):
             one_state = rearrange(one_state, 'b d -> b 1 d')
 
-            logits, cache = model(one_state, past_action_id, meta_controller = meta_controller, return_cache = True)
+            logits, cache = model(one_state, past_action_id, meta_controller = meta_controller, cache = cache, return_cache = True)
 
             past_action_id = model.action_readout.sample(logits)
 
-            # get log prob from meta controller latent actions
+            # extract grpo data and store
 
-            meta_output = cache.prev_hiddens.meta_controller
-
-            old_log_probs = meta_controller.log_prob(meta_output.action_dist, meta_output.actions)
-
-            states.append(meta_output.input_residual_stream)
-            log_probs.append(old_log_probs)
-            switch_betas.append(meta_output.switch_beta)
-            latent_actions.append(meta_output.actions)
+            grpo_data = extract_grpo_data(meta_controller, cache)
+            grpo_data_list.append(grpo_data)
 
         # accumulate across time for the episode data
+
+        states, actions, log_probs, switch_betas = zip(*grpo_data_list)
 
         all_episodes.append((
             cat(states, dim = 1),
             cat(log_probs, dim = 1),
             cat(switch_betas, dim = 1),
-            cat(latent_actions, dim = 1)
+            cat(actions, dim = 1)
         ))
 
         all_rewards.append(torch.randn(1))
@@ -153,6 +146,13 @@ def test_metacontroller(
     # simulate a policy loss update over the entire group
 
     group_states, group_log_probs, group_switch_betas, group_latent_actions = map(partial(cat, dim = 0), zip(*all_episodes))
+    
+    # parallel verification
+
+    parallel_action_dist = meta_controller.get_action_dist_for_internal_rl(group_states)
+    parallel_log_probs = meta_controller.log_prob(parallel_action_dist, group_latent_actions)
+
+    assert torch.allclose(parallel_log_probs, group_log_probs, atol = 1e-5), 'parallel log probs do not match stored log probs'
 
     for states, log_probs, switch_betas, latent_actions, advantages in zip(group_states, group_log_probs, group_switch_betas, group_latent_actions, group_advantages):
         replay_buffer.store_episode(

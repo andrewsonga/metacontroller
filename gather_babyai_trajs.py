@@ -310,7 +310,13 @@ def collect_demonstrations(
     buffer.flush()
     progressbar.close()
 
+    # Save the seeds used for reproducibility
+    seeds_array = np.array(seeds[difficulty])
+    seeds_path = output_folder / "seeds.npy"
+    np.save(seeds_path, seeds_array)
+
     logger.info(f"Saved {successful} trajectories to {output_dir}")
+    logger.info(f"Saved {len(seeds_array)} seeds to {seeds_path}")
 
 if __name__ == "__main__":
     fire.Fire(collect_demonstrations)

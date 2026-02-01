@@ -1,6 +1,6 @@
 <img src="./fig1.png" width="400px"></img>
 
-## metacontroller (wip)
+## metacontroller
 
 Implementation of the MetaController proposed in [Emergent temporal abstractions in autoregressive models enable hierarchical reinforcement learning](https://arxiv.org/abs/2512.20605)
 
@@ -15,6 +15,91 @@ $ pip install metacontroller-pytorch
 - [Pranoy](https://github.com/pranoyr) for submitting a pull request for fixing the previous latent action not being included in the inputs to the switching unit
 
 - [Diego Calanzone](https://github.com/ddidacus) for proposing testing on BabyAI gridworld task, and submitting the [pull request](https://github.com/lucidrains/metacontroller/pull/3) for behavior cloning and discovery phase training for it!
+
+## Usage
+
+```python
+import torch
+from metacontroller import Transformer, MetaController
+
+# 1. initialize model
+
+model = Transformer(
+    dim = 512,
+    action_embed_readout = dict(num_discrete = 4),
+    state_embed_readout = dict(num_continuous = 384),
+    lower_body = dict(depth = 2),
+    upper_body = dict(depth = 2)
+)
+
+state = torch.randn(2, 128, 384)
+actions = torch.randint(0, 4, (2, 128))
+
+# 2. behavioral cloning (BC)
+
+state_loss, action_loss = model(state, actions)
+(state_loss + action_loss).backward()
+
+# 3. discovery phase
+
+meta_controller = MetaController(
+    dim_model = 512,
+    dim_meta_controller = 256,
+    dim_latent = 128
+)
+
+action_recon_loss, kl_loss, switch_loss = model(
+    state,
+    actions,
+    meta_controller = meta_controller,
+    discovery_phase = True
+)
+
+(action_recon_loss + kl_loss + switch_loss).backward()
+
+# 4. internal rl phase (GRPO)
+
+# ... collect trajectories ...
+
+logits, cache = model(
+    one_state,
+    past_action_id,
+    meta_controller = meta_controller,
+    return_cache = True
+)
+
+meta_output = cache.prev_hiddens.meta_controller
+old_log_probs = meta_controller.log_prob(meta_output.action_dist, meta_output.actions)
+
+# ... calculate advantages ...
+
+loss = meta_controller.policy_loss(
+    group_states,
+    group_old_log_probs,
+    group_latent_actions,
+    group_advantages,
+    group_switch_betas
+)
+
+loss.backward()
+```
+
+Or using [evolutionary strategies](https://arxiv.org/abs/2511.16652) for the last portion
+
+```python
+# 5. evolve (ES over GRPO)
+
+model.meta_controller = meta_controller
+
+def environment_callable(model):
+    # return a fitness score
+    return 1.0
+
+model.evolve(
+    num_generations = 10,
+    environment = environment_callable
+)
+```
 
 ## Citations
 
