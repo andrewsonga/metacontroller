@@ -23,32 +23,40 @@ from torch.optim import Adam
 
 from einops import rearrange
 
+from torch_einops_utils import pad_sequence
+
 from accelerate import Accelerator
 
 from babyai_env import create_env
+
 from memmap_replay_buffer import ReplayBuffer
+
 from metacontroller.metacontroller import Transformer, MetaController, policy_loss, z_score, extract_grpo_data
 from metacontroller.transformer_with_resnet import TransformerWithResnet
 
 # research entry point
 
 def reward_shaping_fn(
-    cumulative_rewards: Tensor,
-    all_rewards: Tensor,
-    episode_lens: Tensor,
+    cumulative_rewards: Tensor, # float(num_episodes,)
+    all_rewards: Tensor,        # float(num_episodes, max_timesteps)
+    episode_lens: Tensor,       # int(num_episodes,)
     reject_threshold_cumulative_reward_variance: float = 0.
 ) -> Tensor | None:
     """
     researchers can modify this function to engineer rewards
     or return None to reject the entire batch
-    
-    cumulative_rewards: (num_episodes,)
-    all_rewards: (num_episodes, max_timesteps)
-    episode_lens: (num_episodes,)
     """
+
     if cumulative_rewards.var() < reject_threshold_cumulative_reward_variance:
         return None
+
     return cumulative_rewards
+
+def should_reject_group_based_on_switch_betas(
+    switch_betas: Tensor,
+    episode_lens: Tensor
+):
+    return switch_betas.sum().item() == 0.
 
 # helpers
 
@@ -239,13 +247,11 @@ def main(
         cumulative_rewards = stack(all_cumulative_rewards)
         episode_lens = tensor(all_episode_lens)
 
+        max_len = max(all_episode_lens)
+
         # pad step rewards
 
-        max_len = max(all_episode_lens)
-        padded_step_rewards = torch.zeros(num_groups, max_len)
-
-        for i, (rewards, length) in enumerate(zip(all_step_rewards, all_episode_lens)):
-            padded_step_rewards[i, :length] = rewards
+        padded_step_rewards = pad_sequence(all_step_rewards, dim = 0)
 
         # reward shaping hook
 
@@ -263,6 +269,14 @@ def main(
         group_advantages = z_score(shaped_rewards)
 
         group_states, group_log_probs, group_switch_betas, group_latent_actions = zip(*all_episodes)
+
+        # whether to reject group based on switch betas (as it determines the mask for learning)
+
+        padded_group_switch_betas, episode_lens = pad_sequence(group_switch_betas, dim = 0, return_lens = True)
+
+        if should_reject_group_based_on_switch_betas(padded_group_switch_betas, episode_lens):
+            accelerator.print(f'group rejected - switch betas for the entire group does not meet criteria for learning')
+            continue
 
         for states, log_probs, switch_betas, latent_actions, advantages in zip(group_states, group_log_probs, group_switch_betas, group_latent_actions, group_advantages):
             replay_buffer.store_episode(
