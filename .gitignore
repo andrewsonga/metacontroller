@@ -6,6 +6,8 @@ checkpoints/
 *.sh
 *.out
 *.slurm
+*.lock
+*.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

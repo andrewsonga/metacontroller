@@ -4,10 +4,10 @@ set -e
 # 1. Gather trajectories
 echo "Gathering trajectories..."
 uv run gather_babyai_trajs.py \
-    --num_seeds 100 \
-    --num_episodes_per_seed 10 \
+    --num_seeds 1000 \
+    --num_episodes_per_seed 100 \
     --num_steps 500 \
-    --output_dir end_to_end_trajectories \
+    --output_dir easy_level_trajectories \
     --env_id BabyAI-MiniBossLevel-v0
 
 # 2. Behavioral cloning

@@ -53,7 +53,7 @@ def train(
     wandb_project = "metacontroller-babyai-bc",
     checkpoint_path = "transformer_bc.pt",
     meta_controller_checkpoint_path = "meta_controller_discovery.pt",
-    save_steps = 50,
+    save_steps = 1000,
     state_loss_weight = 1.,
     action_loss_weight = 1.,
     discovery_action_recon_loss_weight = 1.,
