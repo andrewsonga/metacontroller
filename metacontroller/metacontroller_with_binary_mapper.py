@@ -71,6 +71,11 @@ class MetaControllerWithBinaryMapper(Module):
         bidirectional_temporal_encoder_kwargs: dict = dict(
             attn_dim_head = 32, heads = 8
         ),
+        action_proposer_kwargs: dict = dict(
+            depth = 1,
+            attn_dim_head = 32,
+            heads = 8
+        ),
         kl_loss_threshold = 0.
     ):
         super().__init__()
@@ -86,7 +91,7 @@ class MetaControllerWithBinaryMapper(Module):
         self.emitter = GRU(dim_meta * 2, dim_meta * 2)
         self.emitter_to_binary_logits = Linear(dim_meta * 2, dim_code_bits)
 
-        self.action_proposer = GRU(dim_meta, dim_meta)
+        self.action_proposer = Decoder(dim = dim_meta, **action_proposer_kwargs)
         self.proposer_to_binary_logits = Linear(dim_meta, dim_code_bits)
 
         # binary mapper
@@ -158,7 +163,7 @@ class MetaControllerWithBinaryMapper(Module):
     ):
         meta_embed = self.model_to_meta(residual_stream)
 
-        proposed_action_hidden, _ = self.action_proposer(meta_embed)
+        proposed_action_hidden = self.action_proposer(meta_embed)
 
         return self.proposer_to_binary_logits(proposed_action_hidden)
 
@@ -214,7 +219,7 @@ class MetaControllerWithBinaryMapper(Module):
 
         else: # else internal rl phase
 
-            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(meta_embed, prev_action_proposer_hidden)
+            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(meta_embed, return_hiddens = True, cache = prev_action_proposer_hidden)
             to_logits = self.proposer_to_binary_logits
 
         # sample from the binary mapper

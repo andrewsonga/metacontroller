@@ -154,6 +154,11 @@ class MetaController(Module):
         bidirectional_temporal_encoder_kwargs: dict = dict(
             attn_dim_head = 32,
             heads = 8
+        ),
+        action_proposer_kwargs: dict = dict(
+            depth = 1,
+            attn_dim_head = 32,
+            heads = 8
         )
     ):
         super().__init__()
@@ -173,7 +178,7 @@ class MetaController(Module):
 
         # internal rl phase substitutes the acausal + emitter with a causal ssm
 
-        self.action_proposer = GRU(dim_meta, dim_meta)
+        self.action_proposer = Decoder(dim = dim_meta, **action_proposer_kwargs)
         self.action_proposer_mean_log_var = Readout(dim_meta, num_continuous = dim_latent)
 
         # switching unit
@@ -234,7 +239,7 @@ class MetaController(Module):
     ):
         meta_embed = self.model_to_meta(residual_stream)
 
-        proposed_action_hidden, _ = self.action_proposer(meta_embed)
+        proposed_action_hidden = self.action_proposer(meta_embed)
 
         return self.action_proposer_mean_log_var(proposed_action_hidden)
 
@@ -280,7 +285,7 @@ class MetaController(Module):
 
         else: # else internal rl phase
 
-            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(meta_embed, prev_action_proposer_hidden)
+            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(meta_embed, return_hiddens = True, cache = prev_action_proposer_hidden)
             readout = self.action_proposer_mean_log_var
 
         # sample from the gaussian as the action from the meta controller
