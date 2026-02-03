@@ -1,6 +1,6 @@
 [project]
 name = "metacontroller-pytorch"
-version = "0.0.43"
+version = "0.0.49"
 description = "Transformer Metacontroller"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -35,7 +35,7 @@ dependencies = [
     "vector-quantize-pytorch>=1.27.20",
     "x-evolution>=0.1.23",
     "x-mlps-pytorch",
-    "x-transformers"
+    "x-transformers>=2.15.0"
 ]
 
 [project.urls]
@@ -45,12 +45,13 @@ Repository = "https://github.com/lucidrains/metacontroller"
 [project.optional-dependencies]
 examples = []
 test = [
-    "pytest"
+    "pytest",
+    "minGRU-pytorch"
 ]
 
 [tool.pytest.ini_options]
 pythonpath = [
-  "."
+    "."
 ]
 
 [build-system]

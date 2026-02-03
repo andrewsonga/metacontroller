@@ -3,11 +3,12 @@
 #   "fire",
 #   "gymnasium",
 #   "gymnasium[other]",
-#   "metacontroller-pytorch",
+#   "metacontroller-pytorch>=0.0.49",
 #   "minigrid",
 #   "tqdm",
 #   "x-evolution",
-#   "einops"
+#   "einops",
+#   "sentence-transformers"
 # ]
 # ///
 
@@ -22,7 +23,7 @@ from torch import nn, Tensor, tensor
 from torch.nn import Module
 from einops import rearrange
 
-from babyai_env import create_env
+from babyai_env import create_env, get_mission_embedding
 from metacontroller.metacontroller import Transformer, MetaController
 
 # functions
@@ -58,6 +59,7 @@ class BabyAIEnvironment(Module):
         render_every_eps = 100,
         max_steps = 500,
         use_resnet = False,
+        condition_on_mission_embed = False,
         fitness_fn = default_fitness_fn
     ):
         super().__init__()
@@ -67,6 +69,7 @@ class BabyAIEnvironment(Module):
         self.render_every_eps = render_every_eps
         self.max_steps = max_steps
         self.use_resnet = use_resnet
+        self.condition_on_mission_embed = condition_on_mission_embed
         self.fitness_fn = fitness_fn
 
         # initial env creation for observation space etc. if needed
@@ -89,6 +92,13 @@ class BabyAIEnvironment(Module):
 
         seed = torch.randint(0, int(1e6), ()).item()
         state, _ = self.env.reset(seed = seed)
+
+        if self.condition_on_mission_embed:
+            mission = self.env.unwrapped.mission
+            mission_embed = get_mission_embedding(mission)
+            mission_embed = mission_embed.to(device)
+            if mission_embed.ndim == 1:
+                mission_embed = mission_embed.unsqueeze(0)
 
         step = 0
         cache = None
@@ -121,7 +131,8 @@ class BabyAIEnvironment(Module):
                     past_action_id,
                     return_cache = True,
                     return_raw_action_dist = True,
-                    cache = cache
+                    cache = cache,
+                    condition = mission_embed if self.condition_on_mission_embed else None
                 )
 
             action = unwrapped_model.action_readout.sample(logits)
@@ -164,6 +175,7 @@ def main(
     noise_population_size = 50,
     noise_scale = 1e-2,
     learning_rate = 1e-3,
+    condition_on_mission_embed = False,
     fitness_fn = default_fitness_fn
 ):
     # load model
@@ -191,6 +203,7 @@ def main(
         render_every_eps = render_every_eps,
         max_steps = max_steps,
         use_resnet = use_resnet,
+        condition_on_mission_embed = condition_on_mission_embed,
         fitness_fn = fitness_fn
     )
 

@@ -1,1 +1,2 @@
-from metacontroller.metacontroller import MetaController, Transformer
+from metacontroller.metacontroller import MetaController, Transformer, ActionProposerWrapper
+from metacontroller.metacontroller_with_binary_mapper import MetaControllerWithBinaryMapper

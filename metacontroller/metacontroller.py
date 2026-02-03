@@ -54,6 +54,48 @@ def default(*args):
 def straight_through(src, tgt):
     return tgt + src - src.detach()
 
+# action proposer wrapper
+# normalizes any action proposer to a standard interface for MetaController
+
+class ActionProposerWrapper(Module):
+    def __init__(
+        self,
+        module: Module,
+        cache_key = 'cache',
+        return_cache_key = 'return_hiddens'
+    ):
+        super().__init__()
+        self.module = module
+        self.cache_key = cache_key
+        self.return_cache_key = return_cache_key
+
+    def forward(
+        self,
+        x,
+        cache = None
+    ):
+        kwargs = {self.return_cache_key: True}
+
+        if exists(cache):
+            kwargs[self.cache_key] = cache
+
+        out = self.module(x, **kwargs)
+
+        return out if isinstance(out, tuple) else (out, None)
+
+# losses
+
+BehavioralCloningLosses = namedtuple('BehavioralCloningLosses', (
+    'state',
+    'action'
+))
+
+DiscoveryLosses = namedtuple('DiscoveryLosses', (
+    'action_recon',
+    'kl',
+    'switch'
+))
+
 # meta controller
 
 MetaControllerOutput = namedtuple('MetaControllerOutput', (
@@ -141,6 +183,11 @@ class MetaController(Module):
         bidirectional_temporal_encoder_kwargs: dict = dict(
             attn_dim_head = 32,
             heads = 8
+        ),
+        action_proposer: Module | dict = dict(
+            depth = 1,
+            attn_dim_head = 32,
+            heads = 8
         )
     ):
         super().__init__()
@@ -158,9 +205,16 @@ class MetaController(Module):
         self.emitter = GRU(dim_meta * 2, dim_meta * 2)
         self.emitter_to_action_mean_log_var = Readout(dim_meta * 2, num_continuous = dim_latent)
 
-        # internal rl phase substitutes the acausal + emitter with a causal ssm
+        if isinstance(action_proposer, dict):
+            # default to Decoder, wrapped for standard interface
 
-        self.action_proposer = GRU(dim_meta, dim_meta)
+            action_proposer = ActionProposerWrapper(
+                Decoder(dim = dim_meta, **action_proposer),
+                cache_key = 'cache',
+                return_cache_key = 'return_hiddens'
+            )
+
+        self.action_proposer = action_proposer
         self.action_proposer_mean_log_var = Readout(dim_meta, num_continuous = dim_latent)
 
         # switching unit
@@ -267,7 +321,11 @@ class MetaController(Module):
 
         else: # else internal rl phase
 
-            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(meta_embed, prev_action_proposer_hidden)
+            proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(
+                meta_embed,
+                cache = prev_action_proposer_hidden
+            )
+
             readout = self.action_proposer_mean_log_var
 
         # sample from the gaussian as the action from the meta controller
@@ -389,15 +447,26 @@ class Transformer(Module):
         action_embed_readout: dict,
         lower_body: Decoder | dict,
         upper_body: Decoder | dict,
-        meta_controller: MetaController | None = None
+        meta_controller: MetaController | None = None,
+        dim_condition = None
     ):
         super().__init__()
 
+        if exists(dim_condition):
+            transformer_kwargs = dict(
+                dim_condition = dim_condition,
+                use_adaptive_rmsnorm = True
+            )
+        else:
+            transformer_kwargs = dict(
+                use_rmsnorm = True
+            )
+
         if isinstance(lower_body, dict):
-            lower_body = Decoder(dim = dim, pre_norm_has_final_norm = False, **lower_body)
+            lower_body = Decoder(dim = dim, pre_norm_has_final_norm = False, **transformer_kwargs, **lower_body)
 
         if isinstance(upper_body, dict):
-            upper_body = Decoder(dim = dim, **upper_body)
+            upper_body = Decoder(dim = dim, **transformer_kwargs, **upper_body)
 
         self.state_embed, self.state_readout = EmbedAndReadout(dim, **state_embed_readout)
         self.action_embed, self.action_readout = EmbedAndReadout(dim, **action_embed_readout)
@@ -450,7 +519,9 @@ class Transformer(Module):
         return_raw_action_dist = False,
         return_latents = False,
         return_cache = False,
-        episode_lens: Tensor | None = None
+        episode_lens: Tensor | None = None,
+        return_meta_controller_output = False,
+        condition = None
     ):
         device = state.device
 
@@ -510,7 +581,7 @@ class Transformer(Module):
 
             embed = state_embed + action_embed
 
-            residual_stream, next_lower_hiddens = self.lower_body(embed, cache = lower_transformer_hiddens, return_hiddens = True)
+            residual_stream, next_lower_hiddens = self.lower_body(embed, condition = condition, cache = lower_transformer_hiddens, return_hiddens = True)
 
         # meta controller acts on residual stream here
 
@@ -527,7 +598,7 @@ class Transformer(Module):
 
         with upper_transformer_context():
 
-            attended, next_upper_hiddens = self.upper_body(modified_residual_stream, cache = upper_transformer_hiddens, return_hiddens = True)
+            attended, next_upper_hiddens = self.upper_body(modified_residual_stream, condition = condition, cache = upper_transformer_hiddens, return_hiddens = True)
 
             # head readout
 
@@ -544,13 +615,23 @@ class Transformer(Module):
 
             action_clone_loss = self.action_readout.calculate_loss(dist_params, target_actions, mask = loss_mask)
 
-            return state_clone_loss, action_clone_loss
+            losses = BehavioralCloningLosses(state_clone_loss, action_clone_loss)
+
+            if not return_meta_controller_output:
+                return losses
+
+            return losses, next_meta_hiddens
 
         elif discovery_phase:
 
             action_recon_loss = self.action_readout.calculate_loss(dist_params, target_actions)
 
-            return action_recon_loss, next_meta_hiddens.kl_loss, next_meta_hiddens.switch_loss
+            losses = DiscoveryLosses(action_recon_loss, next_meta_hiddens.kl_loss, next_meta_hiddens.switch_loss)
+
+            if not return_meta_controller_output:
+                return losses
+
+            return losses, next_meta_hiddens
 
         # returning
 

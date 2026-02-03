@@ -5,7 +5,8 @@
 #   "tqdm",
 #   "fire",
 #   "memmap-replay-buffer>=0.0.23",
-#   "loguru"
+#   "loguru",
+#   "sentence-transformers"
 # ]
 # ///
 
@@ -28,6 +29,7 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 import torch
 import minigrid
 import gymnasium as gym
+from babyai_env import get_missions_embeddings, get_sbert
 from minigrid.utils.baby_ai_bot import BabyAIBot
 from minigrid.wrappers import FullyObsWrapper, SymbolicObsWrapper
 
@@ -49,20 +51,29 @@ def exists(val):
 def sample(prob):
     return random.random() < prob
 
+def get_mission_for_seed(env_id, seed):
+    """
+    Get the mission string for a given seed.
+    Returns (mission_length, mission_string).
+    """
+    env = gym.make(env_id, render_mode="rgb_array")
+    env.reset(seed=seed)
+    mission = env.unwrapped.mission
+    env.close()
+    return len(mission), mission
+
 def get_mission_length(env_id, seed):
     """
     Get the mission length for a given seed.
     Returns the length of the mission string.
     """
-    env = gym.make(env_id, render_mode="rgb_array")
-    env.reset(seed=seed)
-    length = len(env.unwrapped.mission)
-    env.close()
+    length, _ = get_mission_for_seed(env_id, seed)
     return length
 
 def categorize_seeds_by_difficulty(env_id, num_seeds_per_level, level_difficulty=None):
     """
     Scan seeds and categorize them by difficulty based on mission length.
+    Also collects the mission string for each seed.
     
     Args:
         env_id: Environment ID
@@ -70,13 +81,15 @@ def categorize_seeds_by_difficulty(env_id, num_seeds_per_level, level_difficulty
         level_difficulty: List of levels to collect seeds for.
                        Supported: 'easy', 'medium', 'hard'
                        If None, collects for ['easy', 'hard'].
-        max_seed_to_scan: Maximum seed value to scan
     
     Returns:
-        dict with keys for each requested level, each containing a list of seeds
+        tuple of:
+            - dict with keys for each requested level, each containing a list of seeds
+            - dict mapping seed -> mission string
     """
     
     seeds = {level: [] for level in level_difficulty}
+    seed_to_mission = {}
     
     total_needed = sum(num_seeds_per_level for _ in level_difficulty)
     print(f"Scanning seeds to categorize by difficulty (need {num_seeds_per_level} per level for {level_difficulty})...")
@@ -89,26 +102,29 @@ def categorize_seeds_by_difficulty(env_id, num_seeds_per_level, level_difficulty
             all_done = all(len(seeds[level]) >= num_seeds_per_level for level in level_difficulty)
             
             try:
-                mission_length = get_mission_length(env_id, seed)
+                mission_length, mission = get_mission_for_seed(env_id, seed)
                 
                 # easy: mission length <= 30
                 if 'easy' in level_difficulty and mission_length <= EASY_MAX_LENGTH and len(seeds['easy']) < num_seeds_per_level:
                     seeds['easy'].append(seed)
+                    seed_to_mission[seed] = mission
                     pbar.update(1)
                 # medium: mission length <= 75 (combines easy and medium)
                 elif 'medium' in level_difficulty and mission_length <= MEDIUM_MAX_LENGTH and len(seeds['medium']) < num_seeds_per_level:
                     seeds['medium'].append(seed)
+                    seed_to_mission[seed] = mission
                     pbar.update(1)
                 # hard: mission length > 75
                 elif 'hard' in level_difficulty and mission_length > MEDIUM_MAX_LENGTH and len(seeds['hard']) < num_seeds_per_level:
                     seeds['hard'].append(seed)
+                    seed_to_mission[seed] = mission
                     pbar.update(1)
             except Exception as e:
-                logger.warning(f"Error getting mission length for seed {seed}: {e}")
+                logger.warning(f"Error getting mission for seed {seed}: {e}")
             
             seed += 1
     
-    return seeds
+    return seeds, seed_to_mission
 
 # wrapper, necessarily modified to allow for both rgb obs (policy) and symbolic obs (bot)
 
@@ -167,7 +183,8 @@ class BabyAIBotEpsilonGreedy:
 def collect_single_episode(env_id, seed, num_steps, random_action_prob, state_shape):
     """
     Collect a single episode of demonstrations.
-    Returns tuple of (episode_state, episode_action, success, episode_length)
+    Returns tuple of (episode_state, episode_action, success, episode_length, seed)
+    Note: mission embeddings are pre-computed in main process and looked up by seed.
     """
     if env_id not in gym.envs.registry:
         minigrid.register_minigrid_envs()
@@ -179,18 +196,17 @@ def collect_single_episode(env_id, seed, num_steps, random_action_prob, state_sh
 
     try:
         state_obs, _ = env.reset(seed=seed)
-        
         episode_state = np.zeros((num_steps, *state_shape), dtype=np.float32)
         episode_action = np.zeros(num_steps, dtype=np.float32)
 
-        expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob = random_action_prob)
+        expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob=random_action_prob)
 
         for _step in range(num_steps):
             try:
                 action = expert(state_obs)
             except Exception:
                 env.close()
-                return None, None, False, 0
+                return None, None, False, 0, seed
 
             episode_state[_step] = state_obs["rgb_image"]
             episode_action[_step] = action
@@ -199,14 +215,14 @@ def collect_single_episode(env_id, seed, num_steps, random_action_prob, state_sh
 
             if terminated:
                 env.close()
-                return episode_state, episode_action, True, _step + 1
+                return episode_state, episode_action, True, _step + 1, seed
 
         env.close()
-        return episode_state, episode_action, False, num_steps
+        return episode_state, episode_action, False, num_steps, seed
 
     except Exception:
         env.close()
-        return None, None, False, 0
+        return None, None, False, 0, seed
 
 def collect_demonstrations(
     env_id = "BabyAI-MiniBossLevel-v0",
@@ -216,7 +232,8 @@ def collect_demonstrations(
     random_action_prob = 0.05,
     num_workers = None,
     difficulty = "easy",
-    output_dir = "babyai-minibosslevel-trajectories"
+    output_dir = "babyai-minibosslevel-trajectories",
+    mission_embed_dim = 384
 ):
     """
     The BabyAI Bot should be able to solve all BabyAI environments,
@@ -243,9 +260,19 @@ def collect_demonstrations(
 
     total_episodes = num_seeds * num_episodes_per_seed
 
-    # Collect seeds by difficulty
+    # filter seeds
+
     assert difficulty in ['easy', 'medium', 'hard']
-    seeds = categorize_seeds_by_difficulty(env_id, num_seeds_per_level=num_seeds, level_difficulty=[difficulty])
+    seeds, seed_to_mission = categorize_seeds_by_difficulty(env_id, num_seeds_per_level=num_seeds, level_difficulty=[difficulty])
+
+    # pre-compute embeddings on master process (harder to handle with subprocesses)
+
+    logger.info("Pre-computing mission embeddings with GPU...")
+    sbert = get_sbert(local_files_only = False, device = "cuda" if torch.cuda.is_available() else "cpu")
+    selected_seeds = seeds[difficulty]
+    missions = [seed_to_mission[s] for s in selected_seeds]
+    embeddings = get_missions_embeddings(missions, sbert).cpu().numpy()
+    seed_to_embedding = {s: embeddings[i] for i, s in enumerate(selected_seeds)}
 
     successful = 0
     progressbar = tqdm(total=total_episodes)
@@ -257,51 +284,58 @@ def collect_demonstrations(
         'action': ('float', ())
     }
 
+    meta_fields = {
+        'mission_embedding': ('float', (mission_embed_dim,))
+    }
+
     buffer = ReplayBuffer(
         folder = output_folder,
         max_episodes = total_episodes,
         max_timesteps = num_steps,
         fields = fields,
+        meta_fields = meta_fields,
         overwrite = True
     )
 
-    # Parallel execution with bounded pending futures to avoid OOM
     max_pending = num_workers
-
-    # Flatten seeds: repeat each seed num_episodes_per_seed times
     all_seeds = seeds[difficulty] * num_episodes_per_seed
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         seed_iter = iter(all_seeds)
         futures = {}
 
-        # Initial batch of submissions
+        # submit
+
         for _ in range(min(max_pending, len(all_seeds))):
             seed = next(seed_iter, None)
             if exists(seed):
                 future = executor.submit(collect_single_episode, env_id, seed, num_steps, random_action_prob, state_shape)
                 futures[future] = seed
 
-        # Process completed tasks and submit new ones
+        # collect
+
         while futures:
-            # Wait for at least one future to complete
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
             for future in done:
-                del futures[future]
-                episode_state, episode_action, success, episode_length = future.result()
+                seed = futures.pop(future)
+                episode_state, episode_action, success, episode_length, returned_seed = future.result()
 
                 if success and exists(episode_state):
+
+                    # get cached mission embedding (forced to exist)
+
+                    mission_embedding = seed_to_embedding[returned_seed]
                     buffer.store_episode(
                         state = episode_state[:episode_length],
-                        action = episode_action[:episode_length]
+                        action = episode_action[:episode_length],
+                        mission_embedding = mission_embedding
                     )
                     successful += 1
 
                 progressbar.update(1)
                 progressbar.set_description(f"success rate = {successful}/{progressbar.n:.2f}")
 
-                # Submit a new task to replace the completed one
                 seed = next(seed_iter, None)
                 if exists(seed):
                     new_future = executor.submit(collect_single_episode, env_id, seed, num_steps, random_action_prob, state_shape)
@@ -310,7 +344,6 @@ def collect_demonstrations(
     buffer.flush()
     progressbar.close()
 
-    # Save the seeds used for reproducibility
     seeds_array = np.array(seeds[difficulty])
     seeds_path = output_folder / "seeds.npy"
     np.save(seeds_path, seeds_array)
