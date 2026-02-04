@@ -3,10 +3,10 @@ from __future__ import annotations
 import torch
 from torch import nn, Tensor
 from torch.nn import Module, ModuleList
-from einops import rearrange
-from einops.layers.torch import Rearrange
+from einops import rearrange, reduce
+from einops.layers.torch import Rearrange, Reduce
 
-from metacontroller.metacontroller import Transformer
+from metacontroller.metacontroller import Transformer, Encoder
 
 from torch_einops_utils import pack_with_inverse
 
@@ -111,9 +111,9 @@ class ResNet(Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride = 2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride = 2)
 
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.flatten = Rearrange('b c 1 1 -> b c')
-        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        self.feature_dim = 512 * block.expansion
+
+        self.fc = nn.Linear(self.feature_dim, num_classes)
 
     def _make_layer(
         self,
@@ -137,7 +137,7 @@ class ResNet(Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x, attn: Encoder | None = None):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -148,20 +148,25 @@ class ResNet(Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = self.avgpool(x)
-        x = self.flatten(x)
+        if exists(attn):
+            x = rearrange(x, 'b c h w -> b (h w) c')
+            x = attn(x)
+            x = reduce(x, 'b ... c ->  b c', 'mean')
+        else:
+            x = reduce(x, 'b c ... -> b c', 'mean')
+
         x = self.fc(x)
         return x
 
 # resnet factory
 
-def resnet18(num_classes: any = 1000):
+def resnet18(num_classes = 1000):
     return ResNet(BasicBlock, [2, 2, 2, 2], num_classes)
 
-def resnet34(num_classes: any = 1000):
+def resnet34(num_classes = 1000):
     return ResNet(BasicBlock, [3, 4, 6, 3], num_classes)
 
-def resnet50(num_classes: any = 1000):
+def resnet50(num_classes = 1000):
     return ResNet(Bottleneck, [3, 4, 6, 3], num_classes)
 
 # transformer with resnet
@@ -171,9 +176,13 @@ class TransformerWithResnet(Transformer):
         self,
         *,
         resnet_type = 'resnet18',
+        is_channel_last = False,
+        encoder_kwargs: dict | None = None,
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.is_channel_last = is_channel_last
+
         resnet_klass = resnet18
         if resnet_type == 'resnet34':
             resnet_klass = resnet34
@@ -183,12 +192,19 @@ class TransformerWithResnet(Transformer):
         self.resnet_dim = kwargs['state_embed_readout']['num_continuous']
         self.visual_encoder = resnet_klass(num_classes = self.resnet_dim)
 
-    def visual_encode(self, x: Tensor) -> Tensor:
-        if x.shape[-1] == 3:
+        self.attn = None
+        if exists(encoder_kwargs):
+            assert 'dim' not in encoder_kwargs
+            encoder_kwargs['dim'] = self.visual_encoder.feature_dim
+
+            self.attn = Encoder(**encoder_kwargs)
+
+    def visual_encode(self, x):
+        if self.is_channel_last:
             x = rearrange(x, '... h w c -> ... c h w')
 
         x, inverse = pack_with_inverse(x, '* c h w')
 
-        h = self.visual_encoder(x)
+        h = self.visual_encoder(x, attn = self.attn)
 
         return inverse(h, '* d')

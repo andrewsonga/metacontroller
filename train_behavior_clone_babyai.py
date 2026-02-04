@@ -149,7 +149,7 @@ def train(
     
     transformer_class = TransformerWithResnet if use_resnet else Transformer
 
-    model = transformer_class(
+    transformer_kwargs = dict(
         dim = dim,
         state_embed_readout = dict(num_continuous = state_dim),
         action_embed_readout = dict(num_discrete = num_actions),
@@ -158,6 +158,11 @@ def train(
         meta_controller = meta_controller,
         dim_condition = mission_embed_dim if condition_on_mission_embed else None
     )
+
+    if use_resnet:
+        transformer_kwargs.update(is_channel_last = True)
+
+    model = transformer_class(**transformer_kwargs)
 
     # optimizer
 
