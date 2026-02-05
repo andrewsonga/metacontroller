@@ -4,7 +4,7 @@
 #   "gymnasium",
 #   "gymnasium[other]",
 #   "memmap-replay-buffer>=0.0.12",
-#   "metacontroller-pytorch>=0.0.56",
+#   "metacontroller-pytorch>=0.0.57",
 #   "minigrid",
 #   "tqdm",
 #   "wandb",
@@ -138,7 +138,7 @@ def main(
 
     # check num_envs
 
-    assert divisible_by(num_groups, num_envs), f"num_groups ({num_groups}) must be divisible by num_envs ({num_envs})"
+    assert divisible_by(num_envs, num_groups) or divisible_by(num_groups, num_envs), f"one of num_groups ({num_groups}) or num_envs ({num_envs}) must be divisible by the other"
     assert num_groups >= 2, "num_groups must be at least 2 for relative comparison (GRPO)"
 
     # accelerator
@@ -213,7 +213,8 @@ def main(
 
     num_batch_updates = num_episodes // num_groups
 
-    num_rollout_iterations = num_groups // num_envs
+    num_rollout_iterations = max(1, num_groups // num_envs)
+    num_groups_per_iteration = max(1, num_envs // num_groups)
 
 
     pbar = tqdm(range(num_batch_updates), desc = 'training')
@@ -229,13 +230,18 @@ def main(
         all_step_rewards = []
         all_episode_lens = []
 
-        # every group has a shared seed
+        # seeds for each group (for GRPO relative comparison)
 
-        group_seed = get_next_seed()
+        if num_envs <= num_groups:
+            group_seeds = [get_next_seed()]
+            env_seeds = group_seeds * num_envs
+        else:
+            group_seeds = [get_next_seed() for _ in range(num_groups_per_iteration)]
+            env_seeds = [s for s in group_seeds for _ in range(num_groups)]
 
         for _ in range(num_rollout_iterations):
 
-            state, _ = env.reset(seed = group_seed)
+            state, _ = env.reset(seed = env_seeds)
             state['image'] = transform_to_symbolic(state['image'])
 
             if condition_on_mission_embed:
@@ -359,7 +365,9 @@ def main(
             accelerator.print(f'group rejected - variance of {cumulative_rewards.var().item():.4f} is lower than threshold of {reject_threshold_cumulative_reward_variance}')
             continue
 
-        group_advantages = z_score(shaped_rewards).float()
+        grouped_shaped_rewards = rearrange(shaped_rewards, '(g n) -> g n', n = num_groups)
+        grouped_advantages = z_score(grouped_shaped_rewards, dim = 1)
+        group_advantages = rearrange(grouped_advantages, 'g n -> (g n)').float()
 
         # whether to reject group based on switch betas (as it determines the mask for learning)
 
@@ -367,7 +375,9 @@ def main(
             accelerator.print(f'group rejected - switch betas for the entire group does not meet criteria for learning')
             continue
 
-        for i in range(num_groups):
+        num_trajectories_collected = max(num_groups, num_envs)
+
+        for i in range(num_trajectories_collected):
             L = episode_lens[i]
             replay_buffer.store_episode(
                 states = group_states[i, :L],

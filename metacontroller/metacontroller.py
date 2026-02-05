@@ -118,8 +118,9 @@ GRPOOutput = namedtuple('GRPOOutput', (
     'switch_beta'
 ))
 
-def z_score(t, eps = 1e-8):
-    return (t - t.mean()) / (t.std() + eps)
+def z_score(t, dim = None, eps = 1e-8):
+    kwargs = dict(dim = dim, keepdim = True) if exists(dim) else dict()
+    return (t - t.mean(**kwargs)) / (t.std(**kwargs) + eps)
 
 @move_inputs_to_module_device
 def policy_loss(

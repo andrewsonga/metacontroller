@@ -3,7 +3,7 @@
 #   "fire",
 #   "gymnasium",
 #   "gymnasium[other]",
-#   "metacontroller-pytorch>=0.0.56",
+#   "metacontroller-pytorch>=0.0.57",
 #   "minigrid",
 #   "tqdm",
 #   "x-evolution",
