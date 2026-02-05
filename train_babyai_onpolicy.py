@@ -4,6 +4,7 @@
 #   "gymnasium",
 #   "gymnasium[other]",
 #   "metacontroller-pytorch>=0.0.57",
+#   "torch-einops-utils @ git+https://github.com/lucidrains/torch-einops-utils.git",
 #   "minigrid",
 #   "tqdm",
 #   "wandb",
@@ -36,6 +37,14 @@ from gymnasium.vector import AsyncVectorEnv
 from metacontroller.metacontroller import Transformer, MetaController, z_score, extract_grpo_data
 from metacontroller.transformer_with_resnet import TransformerWithResnet
 from functools import partial
+
+# Patch x_transformers so checkpoint config can unpickle (Identity was removed/moved in some versions)
+try:
+    import x_transformers.x_transformers as _xt_module
+    if not hasattr(_xt_module, "Identity"):
+        _xt_module.Identity = torch.nn.Identity
+except Exception:
+    pass
 
 # research entry point
 
@@ -87,17 +96,16 @@ def main(
     meta_controller_weights_path: str | None = None,
     output_meta_controller_path = 'metacontroller_rl_trained.pt',
     use_resnet = False,
-    lr = 1e-4,
+    lr = 3e-5,
     save_steps = 100,
-    num_groups = 16,
+    batch_size = 16,
     max_grad_norm = 1.0,
     use_wandb = False,
     wandb_project = 'metacontroller-babyai-rl',
     reject_threshold_cumulative_reward_variance = 0.1,
     condition_on_mission_embed = False,
-    num_envs = 1,
-    env_shared_memory = False,
-    env_context = 'spawn'
+    env_shared_memory = True,
+    env_context = 'fork'
 ):
 
     def store_checkpoint(step: int):
@@ -111,7 +119,9 @@ def main(
 
     group_seeds = None
     if not exists(seed) and exists(npy_seedfile):
+        cap_seeds = 10
         group_seeds = np.load(npy_seedfile, allow_pickle=True).astype(int).tolist()
+        group_seeds = group_seeds[:cap_seeds]
         
     seed_index = 0
 
@@ -125,10 +135,8 @@ def main(
             return s
         return torch.randint(0, 1000000, (1,)).item()
 
-    # check num_envs
-
-    assert divisible_by(num_envs, num_groups) or divisible_by(num_groups, num_envs), f"one of num_groups ({num_groups}) or num_envs ({num_envs}) must be divisible by the other"
-    assert num_groups >= 2, "num_groups must be at least 2 for relative comparison (GRPO)"
+    # batch_size = number of simultaneous trajectories (the group) = number of parallel envs
+    assert batch_size >= 2, "batch_size must be at least 2 for relative comparison (GRPO)"
 
     # accelerator
 
@@ -148,8 +156,7 @@ def main(
         use_symbolic = False
     )
 
-    env = AsyncVectorEnv([env_make_fn] * num_envs, shared_memory = env_shared_memory, context = env_context)
-
+    env = AsyncVectorEnv([env_make_fn] * batch_size, shared_memory = env_shared_memory, context = env_context)
 
 
     # load models
@@ -188,12 +195,11 @@ def main(
 
     # rollouts
 
-    num_batch_updates = num_episodes // num_groups
-
-    num_rollout_iterations = max(1, num_groups // num_envs)
-    num_groups_per_iteration = max(1, num_envs // num_groups)
+    num_batch_updates = num_episodes // batch_size
 
     pbar = tqdm(range(num_batch_updates), desc = 'training')
+    
+    print("starting training")
 
     for gradient_step in pbar:
 
@@ -204,110 +210,95 @@ def main(
         all_step_rewards = []
         all_episode_lens = []
 
-        # seeds for each group (for GRPO relative comparison)
+        # one group of batch_size trajectories per gradient step (for GRPO relative comparison)
+        group_seed = get_next_seed()
+        env_seeds = [group_seed] * batch_size
 
-        if num_envs <= num_groups:
-            group_seeds = [get_next_seed()]
-            env_seeds = group_seeds * num_envs
-        else:
-            group_seeds = [get_next_seed() for _ in range(num_groups_per_iteration)]
-            env_seeds = [s for s in group_seeds for _ in range(num_groups)]
+        state, _ = env.reset(seed = env_seeds)
 
-        for _ in range(num_rollout_iterations):
+        if condition_on_mission_embed:
+            missions = env.get_attr('mission')
+            mission_embed = get_missions_embeddings(missions)
+            mission_embed = mission_embed.to(accelerator.device)
 
-            state, _ = env.reset(seed = env_seeds)
-            state['image'] = transform_to_symbolic(state['image'])
+        cache = None
+        past_action_id = None
 
-            if condition_on_mission_embed:
-                missions = env.get_attr('mission')
-                mission_embed = get_missions_embeddings(missions)
-                mission_embed = mission_embed.to(accelerator.device)
+        iteration_states = []
+        iteration_log_probs = []
+        iteration_switch_betas = []
+        iteration_latent_actions = []
+        iteration_rewards = []
 
-            cache = None
-            past_action_id = None
+        dones = torch.zeros(batch_size, dtype = torch.bool)
 
-            iteration_states = []
-            iteration_log_probs = []
-            iteration_switch_betas = []
-            iteration_latent_actions = []
-            iteration_rewards = []
+        all_steps_dones = []
 
-            dones = torch.zeros(num_envs, dtype = torch.bool)
+        # rollout: batch of batch_size parallel trajectories (one env per trajectory)
+        for step in range(max_timesteps):
+            # state['image']: (batch_size, H, W, C)
+            image = state['image']
+            image_tensor = torch.from_numpy(image).float().to(accelerator.device)
 
-            all_steps_dones = []
+            if use_resnet:
+                image_tensor = rearrange(image_tensor, 'b h w c -> b 1 h w c')
+                image_tensor = unwrapped_model.visual_encode(image_tensor)
+            else:
+                image_tensor = rearrange(image_tensor, 'b h w c -> b 1 (h w c)')
 
-            # rollout parallel trajectories
+            if torch.is_tensor(past_action_id):
+                past_action_id = past_action_id.long()
 
-            for step in range(max_timesteps):
+            with torch.no_grad():
+                logits, cache = unwrapped_model(
+                    image_tensor,
+                    past_action_id,
+                    meta_controller = unwrapped_meta_controller,
+                    return_cache = True,
+                    return_raw_action_dist = True,
+                    cache = cache,
+                    condition = mission_embed if condition_on_mission_embed else None
+                )
 
-                image = state['image']
-                image_tensor = torch.from_numpy(image).float().to(accelerator.device)
+            action = unwrapped_model.action_readout.sample(logits)
+            past_action_id = action
 
-                if use_resnet:
-                    image_tensor = rearrange(image_tensor, 'b h w c -> b 1 h w c')
-                    image_tensor = unwrapped_model.visual_encode(image_tensor)
-                else:
-                    image_tensor = rearrange(image_tensor, 'b h w c -> b 1 (h w c)')
+            grpo_data = extract_grpo_data(unwrapped_meta_controller, cache)
 
-                if torch.is_tensor(past_action_id):
-                    past_action_id = past_action_id.long()
+            iteration_states.append(grpo_data.state)
+            iteration_log_probs.append(grpo_data.log_prob)
+            iteration_switch_betas.append(grpo_data.switch_beta)
+            iteration_latent_actions.append(grpo_data.action)
 
-                with torch.no_grad():
-                    logits, cache = unwrapped_model(
-                        image_tensor,
-                        past_action_id,
-                        meta_controller = unwrapped_meta_controller,
-                        return_cache = True,
-                        return_raw_action_dist = True,
-                        cache = cache,
-                        condition = mission_embed if condition_on_mission_embed else None
-                    )
+            next_state, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
+            next_state['image'] = transform_to_symbolic(next_state['image'])
 
-                action = unwrapped_model.action_readout.sample(logits)
-                past_action_id = action
+            iteration_rewards.append(reward)
 
-                # GRPO collection
+            all_steps_dones.append(dones.clone())
+            dones |= torch.from_numpy(terminated | truncated)
 
-                grpo_data = extract_grpo_data(unwrapped_meta_controller, cache)
+            if dones.all():
+                break
 
-                iteration_states.append(grpo_data.state)
-                iteration_log_probs.append(grpo_data.log_prob)
-                iteration_switch_betas.append(grpo_data.switch_beta)
-                iteration_latent_actions.append(grpo_data.action)
+            state = next_state
 
-                next_state, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
-                next_state['image'] = transform_to_symbolic(next_state['image'])
+        episode_lens = (~torch.stack(all_steps_dones)).sum(dim = 0)
 
-                iteration_rewards.append(reward)
+        cur_states = torch.cat(iteration_states, dim = 1)
+        cur_log_probs = torch.cat(iteration_log_probs, dim = 1)
+        cur_switch_betas = torch.cat(iteration_switch_betas, dim = 1)
+        cur_latent_actions = torch.cat(iteration_latent_actions, dim = 1)
+        cur_rewards = tensor(np.stack(iteration_rewards))  # (timesteps, batch_size)
 
-                all_steps_dones.append(dones.clone())
-                dones |= torch.from_numpy(terminated | truncated)
+        all_states.append(cur_states)
+        all_log_probs.append(cur_log_probs)
+        all_switch_betas.append(cur_switch_betas)
+        all_latent_actions.append(cur_latent_actions)
+        all_step_rewards.append(cur_rewards)
+        all_episode_lens.append(episode_lens)
 
-                if dones.all():
-                    break
-
-                state = next_state
-
-            # post-process for each environment
-
-            episode_lens = (~torch.stack(all_steps_dones)).sum(dim = 0)
-
-            cur_states = torch.cat(iteration_states, dim = 1)
-            cur_log_probs = torch.cat(iteration_log_probs, dim = 1)
-            cur_switch_betas = torch.cat(iteration_switch_betas, dim = 1)
-            cur_latent_actions = torch.cat(iteration_latent_actions, dim = 1)
-            cur_rewards = tensor(np.stack(iteration_rewards)) # (timesteps, num_envs)
-
-            # store environment data in batches per iteration
-
-            all_states.append(cur_states)
-            all_log_probs.append(cur_log_probs)
-            all_switch_betas.append(cur_switch_betas)
-            all_latent_actions.append(cur_latent_actions)
-            all_step_rewards.append(cur_rewards)
-            all_episode_lens.append(episode_lens)
-
-        # align all sequences across rollout iterations
+        # pack group data (single rollout → one group of batch_size trajectories)
 
         group_states = pad_sequence_and_cat(all_states, dim = 1, dim_cat = 0)
         group_log_probs = pad_sequence_and_cat(all_log_probs, dim = 1, dim_cat = 0)
@@ -341,7 +332,7 @@ def main(
             accelerator.print(f'group rejected - variance of {cumulative_rewards.var().item():.4f} is lower than threshold of {reject_threshold_cumulative_reward_variance}')
             continue
 
-        grouped_shaped_rewards = rearrange(shaped_rewards, '(g n) -> g n', n = num_groups)
+        grouped_shaped_rewards = rearrange(shaped_rewards, '(g n) -> g n', n = batch_size)
         grouped_advantages = z_score(grouped_shaped_rewards, dim = 1)
         group_advantages = rearrange(grouped_advantages, 'g n -> (g n)').float()
         

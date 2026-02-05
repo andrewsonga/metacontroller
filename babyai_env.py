@@ -1,3 +1,4 @@
+import string
 import torch
 import numpy as np
 from functools import lru_cache
@@ -5,10 +6,61 @@ from pathlib import Path
 from shutil import rmtree
 
 import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.core import Wrapper
+
 import minigrid
 from minigrid.wrappers import FullyObsWrapper, SymbolicObsWrapper
 
 from sentence_transformers import SentenceTransformer
+
+# Mission space compatible with gymnasium shared memory (for AsyncVectorEnv)
+BABYAI_MISSION_TEXT_MAX_LENGTH = 512
+BABYAI_MISSION_CHARSET = " " + string.ascii_lowercase + string.ascii_uppercase + string.digits + "',.-"
+
+
+class BabyAISharedMemoryWrapper(Wrapper):
+    """
+    Replaces the BabyAI mission observation space (BabyAIMissionSpace) with
+    gymnasium.spaces.Text so that AsyncVectorEnv(..., shared_memory=True) works.
+    Observation values are unchanged: mission remains a string.
+    """
+
+    def __init__(self, env, max_mission_length=BABYAI_MISSION_TEXT_MAX_LENGTH, charset=BABYAI_MISSION_CHARSET):
+        super().__init__(env)
+        if "mission" not in env.observation_space.spaces:
+            return
+        mission_space = env.observation_space.spaces["mission"]
+        # Replace only if it's minigrid's MissionSpace (no create_shared_memory in gymnasium)
+        if type(mission_space).__name__ in ("BabyAIMissionSpace", "MissionSpace"):
+            self._mission_text_space = spaces.Text(max_length=max_mission_length, charset=charset)
+            self.observation_space = spaces.Dict(
+                {
+                    **{k: v for k, v in env.observation_space.spaces.items() if k != "mission"},
+                    "mission": self._mission_text_space,
+                }
+            )
+        else:
+            self._mission_text_space = None
+
+    def _process_obs(self, obs):
+        if self._mission_text_space is None:
+            return obs
+        # Mission stays as string; Text space accepts it for shared memory encode
+        mission = obs.get("mission", "")
+        if len(mission) > self._mission_text_space.max_length:
+            mission = mission[: self._mission_text_space.max_length]
+        obs = dict(obs)
+        obs["mission"] = mission
+        return obs
+
+    def reset(self, *, seed=None, options=None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        return self._process_obs(obs), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return self._process_obs(obs), reward, terminated, truncated, info
 
 # sbert
 
@@ -93,7 +145,7 @@ def create_env(
     use_symbolic = True
 ):
     # register minigrid environments if needed
-    minigrid.register_minigrid_envs()
+    # minigrid.register_minigrid_envs()
 
     # environment
     env = gym.make(env_id, render_mode = render_mode)
@@ -101,6 +153,8 @@ def create_env(
 
     if use_symbolic:
         env = SymbolicObsWrapper(env)
+
+    env = BabyAISharedMemoryWrapper(env)
 
     if video_folder is not None:
         video_folder = Path(video_folder)
