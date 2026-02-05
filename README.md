@@ -75,6 +75,9 @@ old_log_probs = meta_controller.log_prob(meta_output.action_dist, meta_output.ac
 
 # ... calculate advantages ...
 
+# for GRPO, the inputs to policy loss should be of shape (batch, seq, dim_latent)
+# where dim_latent is the dimension of the latent action space
+
 loss = meta_controller.policy_loss(
     group_states,
     group_old_log_probs,

@@ -133,6 +133,11 @@ def policy_loss(
     episode_lens = None,
     eps_clip = 0.2
 ):
+    # if switch betas sent as mask without converting to bool, just take care of it
+
+    if mask.dtype == torch.float:
+        mask = mask > 0.5
+
     # get new log probs
 
     action_dist = meta_controller.get_action_dist_for_internal_rl(state)
