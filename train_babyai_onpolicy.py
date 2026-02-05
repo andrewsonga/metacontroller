@@ -65,13 +65,13 @@ def default(v, d):
 # main
 
 def main(
-    npy_skipfile = None,
+    seed: int | None = None,
+    npy_seedfile = None,
     env_name = 'BabyAI-BossLevel-v0',
     num_episodes = int(10e6),
     max_timesteps = 500,
     render_every_eps = 1_000,
     video_folder = './recordings',
-    seed: int | None = None,
     transformer_weights_path: str | None = None,
     meta_controller_weights_path: str | None = None,
     output_meta_controller_path = 'metacontroller_rl_trained.pt',
@@ -93,15 +93,23 @@ def main(
             unwrapped_meta_controller.save(meta_controller_checkpoint_path_with_step)
             accelerator.print(f"MetaController to {meta_controller_checkpoint_path_with_step}")
 
-    # seeds to skip
+    # seed selection priority: 1) fixed seed arg, 2) numpy seedfile, 3) random
 
-    skip_seeds = set(np.load(npy_skipfile)) if exists(npy_skipfile) else set()
+    group_seeds = None
+    if not exists(seed) and exists(npy_seedfile):
+        group_seeds = np.load(npy_seedfile, allow_pickle=True).astype(int).tolist()
+        
+    seed_index = 0
 
-    def random_seed_not_in_skip():
-        while True:
-            s = torch.randint(0, 1000000, (1,)).item()
-            if s not in skip_seeds:
-                return s
+    def get_next_seed():
+        nonlocal seed_index
+        if exists(seed):
+            return seed
+        if group_seeds is not None:
+            s = group_seeds[seed_index % len(group_seeds)]
+            seed_index += 1
+            return s
+        return torch.randint(0, 1000000, (1,)).item()
 
     # accelerator
 
@@ -169,7 +177,7 @@ def main(
 
         # every group has a shared seed (for GRPO relative comparison)
 
-        group_seed = default(seed, random_seed_not_in_skip())
+        group_seed = get_next_seed()
 
         for i in range(num_groups):
 
@@ -322,7 +330,8 @@ def main(
         pbar.set_postfix(
             loss = f'{loss.item():.4f}',
             grad_norm = f'{grad_norm.item():.4f}',
-            reward = f'{cumulative_rewards.mean().item():.4f}'
+            reward = f'{cumulative_rewards.mean().item():.4f}',
+            seed = f'{group_seed}'
         )
 
         accelerator.log({
@@ -332,7 +341,7 @@ def main(
             'reward_std': cumulative_rewards.std().item(),
         })
 
-        accelerator.print(f'loss: {loss.item():.4f}, grad_norm: {grad_norm.item():.4f}, reward: {cumulative_rewards.mean().item():.4f}')
+        accelerator.print(f'loss: {loss.item():.4f}, grad_norm: {grad_norm.item():.4f}, reward: {cumulative_rewards.mean().item():.4f}, seed: {group_seed}')
 
         if gradient_step % save_steps == 0:
             store_checkpoint(gradient_step)

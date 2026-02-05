@@ -53,7 +53,7 @@ def train(
     batch_size = 128,
     gradient_accumulation_steps = None, 
     lr = 1e-4,
-    discovery_lr = 1e-4,
+    discovery_lr = 3e-5,
     weight_decay = 0.03,
     discovery_weight_decay = 0.03,
     dim = 512,

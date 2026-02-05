@@ -110,7 +110,7 @@ def categorize_seeds_by_difficulty(env_id, num_seeds_per_level, level_difficulty
                     seed_to_mission[seed] = mission
                     pbar.update(1)
                 # medium: mission length <= 75 (combines easy and medium)
-                elif 'medium' in level_difficulty and mission_length <= MEDIUM_MAX_LENGTH and len(seeds['medium']) < num_seeds_per_level:
+                elif 'medium' in level_difficulty and mission_length > EASY_MAX_LENGTH and mission_length <= MEDIUM_MAX_LENGTH and len(seeds['medium']) < num_seeds_per_level:
                     seeds['medium'].append(seed)
                     seed_to_mission[seed] = mission
                     pbar.update(1)
