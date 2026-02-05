@@ -254,6 +254,8 @@ def get_mission_length(env_id, seed):
     env.close()
     return length
 
+
+
 class BabyAIBotEpsilonGreedy:
     def __init__(self, env, random_action_prob = 0.):
         self.expert = BabyAIBot(env)
@@ -294,6 +296,7 @@ def collect_single_episode(env_id, obj_seq, seed, num_steps, random_action_prob,
         
         episode_state = np.zeros((num_steps, *state_shape), dtype=np.float32)
         episode_action = np.zeros(num_steps, dtype=np.float32)
+        episode_label = -np.ones(num_steps, dtype=np.float32)     # these are the per-step subgoal labels (i.e. object indices)
 
         expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob=random_action_prob)
 
@@ -305,12 +308,25 @@ def collect_single_episode(env_id, obj_seq, seed, num_steps, random_action_prob,
         for _step in range(num_steps):
             try:
                 action = expert(state_obs)
-            # print error if there's an exception
+
+                # extract the intended subgoal
+                if hasattr(expert.expert, 'stack') and expert.expert.stack:
+                    # each entry in self.expert.stack is a SubGoal instance
+                    # current subgoal is the last entry in the stack
+                    subgoal = expert.expert.stack[-1]
+                    
+                    if subgoal.reason == "Explore":
+                        obj_idx = -1   # -1 indicates explore
+                    else:
+                        assert subgoal.reason is None
+                        assert isinstance(subgoal.datum, ObjDesc)
+                        obj_idx = env.unwrapped.obj_to_idx[(subgoal.datum.type, subgoal.datum.color)]
             except Exception as e:
                 print("Error: ", e)
                 env.close()
-                return None, None, None, False, 0
+                return None, None, None, None, False, 0
 
+            episode_label[_step] = obj_idx
             episode_state[_step] = state_obs["one_hot"]
             episode_action[_step] = action
 
@@ -321,15 +337,14 @@ def collect_single_episode(env_id, obj_seq, seed, num_steps, random_action_prob,
 
             if terminated:
                 env.close()
-                return frames, episode_state, episode_action, True, _step + 1
+                return frames, episode_label, episode_state, episode_action, True, _step + 1
 
         env.close()
-        return frames, episode_state, episode_action, False, num_steps
-
+        return frames, episode_label, episode_state, episode_action, False, num_steps
     except Exception as e:
         print("Error: ", e)
         env.close()
-        return None, None, None, False, 0
+        return None, None, None, None, False, 0
 
 def collect_demonstrations(
     env_id = "PinPad-v0",
@@ -408,7 +423,8 @@ def collect_demonstrations(
 
     fields = {
         'state': ('float', state_shape),
-        'action': ('float', ())
+        'action': ('float', ()),
+        'label': ('float', ()),          # subgoal labels (i.e. object indices)
     }
 
     buffer = ReplayBuffer(
@@ -443,12 +459,13 @@ def collect_demonstrations(
 
             for future in done:
                 del futures[future]
-                frames, episode_state, episode_action, success, episode_length = future.result()
+                frames, episode_label, episode_state, episode_action, success, episode_length = future.result()
 
                 if success and exists(episode_state):
                     buffer.store_episode(
                         state = episode_state[:episode_length],
-                        action = episode_action[:episode_length]
+                        action = episode_action[:episode_length],
+                        label = episode_label[:episode_length],
                     )
 
                     # if visualize, save frames as .gif
