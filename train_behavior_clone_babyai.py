@@ -3,7 +3,7 @@
 #   "accelerate",
 #   "fire",
 #   "memmap-replay-buffer>=0.0.23",
-#   "metacontroller-pytorch>=0.0.49",
+#   "metacontroller-pytorch>=0.0.57",
 #   "torch",
 #   "einops",
 #   "tqdm",

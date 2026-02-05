@@ -2,7 +2,7 @@
 
 ## metacontroller
 
-Implementation of the MetaController proposed in [Emergent temporal abstractions in autoregressive models enable hierarchical reinforcement learning](https://arxiv.org/abs/2512.20605)
+Implementation of the MetaController proposed in [Emergent temporal abstractions in autoregressive models enable hierarchical reinforcement learning](https://arxiv.org/abs/2512.20605), from the Paradigms of Intelligence team at Google
 
 ## Install
 
@@ -74,6 +74,9 @@ meta_output = cache.prev_hiddens.meta_controller
 old_log_probs = meta_controller.log_prob(meta_output.action_dist, meta_output.actions)
 
 # ... calculate advantages ...
+
+# for GRPO, the inputs to policy loss should be of shape (batch, seq, dim_latent)
+# where dim_latent is the dimension of the latent action space
 
 loss = meta_controller.policy_loss(
     group_states,
