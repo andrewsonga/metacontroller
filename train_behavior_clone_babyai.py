@@ -122,7 +122,7 @@ def train(
     state_loss_weight = 1.,
     action_loss_weight = 1.,
     discovery_action_recon_loss_weight = 1.,
-    discovery_kl_loss_weight = 1.,
+    discovery_kl_loss_weight = 0.15,
     max_grad_norm = 1.,
     use_resnet = False,
     condition_on_mission_embed = False,
