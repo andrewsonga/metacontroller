@@ -224,6 +224,10 @@ class MetaControllerWithBinaryMapper(Module):
         hard_switch = default(hard_switch, not discovery_phase) # think during internal RL phase, it needs to be a hard switch, then only the actions emitted during the switch is reinforced
 
         if discovery_phase:
+
+            if exists(prev_action_proposer_hidden):
+                logger.warning('meta controller cache being passed back in for discovery phase, which does not make sense given bidirectional encoder')
+
             mask = maybe(lens_to_mask)(episode_lens, meta_embed.shape[1])
 
             encoded_temporal = self.bidirectional_temporal_encoder(meta_embed, mask = mask)
