@@ -163,6 +163,7 @@ def train(
     dim_head = 64,
     use_wandb = False,
     wandb_project = "metacontroller-pinpad-bc",
+    wandb_run_name = None,
     checkpoint_path = "transformer_pinpad_bc.pt",
     meta_controller_checkpoint_path = "meta_controller_pinpad_discovery.pt",
     save_steps = 1000,
@@ -196,6 +197,10 @@ def train(
     accelerator = Accelerator(log_with = "wandb" if use_wandb else None)
 
     if use_wandb:
+        init_kwargs = {}
+        if exists(wandb_run_name):
+            init_kwargs["wandb"] = {"name": wandb_run_name}
+        
         accelerator.init_trackers(
             wandb_project,
             config = {
@@ -209,8 +214,10 @@ def train(
                 "dim_head": dim_head,
                 "env_id": env_id,
                 "state_loss_weight": state_loss_weight,
-                "action_loss_weight": action_loss_weight
-            }
+                "action_loss_weight": action_loss_weight,
+                "discovery_kl_loss_weight": discovery_kl_loss_weight,
+            },
+            init_kwargs = init_kwargs
         )
 
     # replay buffer and dataloader

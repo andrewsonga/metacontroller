@@ -470,8 +470,8 @@ def collect_demonstrations(
 
                     # if visualize, save frames as .gif
                     # assert frames is not None
-                    assert frames is not None
                     if visualize:
+                        assert frames is not None
                         frames_path = output_folder / f"episode_{successful}.gif"
                         imageio.mimsave(frames_path, frames, fps=3)
                     
