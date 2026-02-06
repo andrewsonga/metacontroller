@@ -49,17 +49,16 @@ def default(v, d):
 
 
 def visualize_switch_betas(
-    switch_betas,      # (B, T-1, C)
+    switch_betas,      # (B, T-1)
     episode_lens,      # (B,) or None
     gradient_step,
-    num_samples=3,
-    num_random_dims=2
+    num_samples = 3
 ):
     """
     Visualize switch betas for randomly sampled sequences in the batch.
     Logs a single stacked figure to wandb.
     """
-    B, T_minus_1, C = switch_betas.shape
+    B, T_minus_1 = switch_betas.shape
     
     # randomly sample sequences from the batch
     num_samples = min(num_samples, B)
@@ -81,20 +80,12 @@ def visualize_switch_betas(
             ep_len = T_minus_1
         
         # extract data for this sample
-        sample_switch_betas = switch_betas[idx, :ep_len-1, :].detach().cpu()  # (T-1, C)
-        
-        # compute mean across final dimension
-        switch_betas_mean = sample_switch_betas.mean(dim=-1)  # (T-1,)
-        
-        # randomly sample dimensions
-        random_dims = np.random.choice(C, size=min(num_random_dims, C), replace=False)
+        sample_switch_betas = switch_betas[idx, :ep_len-1].detach().cpu()  # (T-1,)
         
         ax = axes[i]
         
         # plot switch betas
-        ax.plot(switch_betas_mean.numpy(), label='switch betas mean', linewidth=2)
-        for dim in random_dims:
-            ax.plot(sample_switch_betas[:, dim].numpy(), label=f'switch betas dim={dim}', alpha=0.7)
+        ax.plot(sample_switch_betas.numpy(), label='switch betas', linewidth=2)
         ax.set_xlabel('timesteps')
         ax.set_ylabel(f'switch betas (sample {idx})')
         ax.legend(loc='upper right')
@@ -351,11 +342,10 @@ def train(
                 # visualize switch betas during discovery phase
                 if is_discovering and use_wandb and accelerator.is_main_process:
                     visualize_switch_betas(
-                        switch_betas=meta_controller_output.switch_beta,
-                        episode_lens=episode_lens,
-                        gradient_step=gradient_step,
-                        num_samples=3,
-                        num_random_dims=2
+                        switch_betas = meta_controller_output.switch_beta,
+                        episode_lens = episode_lens,
+                        gradient_step = gradient_step,
+                        num_samples = 3
                     )
 
         avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
