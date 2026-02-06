@@ -203,7 +203,8 @@ class MetaController(Module):
             attn_dim_head = 32,
             heads = 8
         ),
-        target_switch_rate = 0.15
+        target_switch_rate = 0.15,
+        switch_temperature = 0.1
     ):
         super().__init__()
         self.dim_model = dim_model
@@ -238,7 +239,10 @@ class MetaController(Module):
 
         self.dim_latent = dim_latent
         self.switching_unit = GRU(dim_meta + dim_latent, dim_meta)
+
         self.to_switching_unit_beta = nn.Linear(dim_meta, 1, bias = False)
+
+        self.switch_temperature = switch_temperature
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
 
@@ -378,7 +382,10 @@ class MetaController(Module):
             prev_switching_unit_gru_hidden
         )
 
-        switch_beta = self.to_switching_unit_beta(switching_unit_gru_out).sigmoid()
+        switch_beta_logit = self.to_switching_unit_beta(switching_unit_gru_out)
+
+        switch_beta = (switch_beta_logit / self.switch_temperature).sigmoid()
+
         switch_beta = rearrange(switch_beta, '... 1 -> ...')
 
         # need to encourage normal distribution
