@@ -78,12 +78,10 @@ class MetaControllerWithBinaryMapper(Module):
             heads = 8
         ),
         kl_loss_threshold = 0.,
-        target_switch_rate = 0.15,
         switch_temperature = 0.1
     ):
         super().__init__()
         self.dim_model = dim_model
-        self.target_switch_rate = target_switch_rate
 
         dim_meta = default(dim_meta_controller, dim_model)
 
@@ -287,24 +285,11 @@ class MetaControllerWithBinaryMapper(Module):
 
         # losses
 
-        switch_loss = self.zero
-
         if discovery_phase:
             # weight unreduced kl loss by switch gates
 
-            weighted_kl_loss = einx.multiply('b n ..., b n', kl_loss, switch_beta)
-            kl_loss = weighted_kl_loss.sum(dim = -1).mean()
+            kl_loss = kl_loss.sum(dim = -1).mean()
 
-            # encourage less switching - hinge loss
-
-            mask = None
-
-            if exists(episode_lens):
-                mask = lens_to_mask(episode_lens, seq_len)
-
-            actual_switch_rate = masked_mean(switch_beta, mask, dim = 1)
-
-            switch_loss = F.relu(actual_switch_rate - self.target_switch_rate).mean()
         else:
             kl_loss = self.zero
 
@@ -345,6 +330,6 @@ class MetaControllerWithBinaryMapper(Module):
             sampled_codes[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss)
 
 MetaControllerWithBinaryMapper.policy_loss = policy_loss

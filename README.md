@@ -50,14 +50,14 @@ meta_controller = MetaController(
     dim_latent = 128
 )
 
-action_recon_loss, kl_loss, switch_loss = model(
+action_recon_loss, kl_loss = model(
     state,
     actions,
     meta_controller = meta_controller,
     discovery_phase = True
 )
 
-(action_recon_loss + kl_loss + switch_loss).backward()
+(action_recon_loss + kl_loss).backward()
 
 # 4. internal rl phase (GRPO)
 

@@ -96,7 +96,6 @@ BehavioralCloningLosses = namedtuple('BehavioralCloningLosses', (
 DiscoveryLosses = namedtuple('DiscoveryLosses', (
     'action_recon',
     'kl',
-    'switch'
 ))
 
 # meta controller
@@ -108,7 +107,6 @@ MetaControllerOutput = namedtuple('MetaControllerOutput', (
     'actions',
     'switch_beta',
     'kl_loss',
-    'switch_loss'
 ))
 
 GRPOOutput = namedtuple('GRPOOutput', (
@@ -203,12 +201,10 @@ class MetaController(Module):
             attn_dim_head = 32,
             heads = 8
         ),
-        target_switch_rate = 0.15,
         switch_temperature = 0.1
     ):
         super().__init__()
         self.dim_model = dim_model
-        self.target_switch_rate = target_switch_rate
         
         dim_meta = default(dim_meta_controller, dim_model)
 
@@ -393,7 +389,7 @@ class MetaController(Module):
 
         # need to encourage normal distribution
 
-        kl_loss = switch_loss = self.zero
+        kl_loss = self.zero
 
         if discovery_phase:
             mean, log_var = action_dist.unbind(dim = -1)
@@ -405,19 +401,7 @@ class MetaController(Module):
                 - 1.
             ))
 
-            kl_loss = einx.multiply('b n ..., b n', kl_loss, switch_beta)
             kl_loss = kl_loss.sum(dim = -1).mean()
-
-            # encourage less switching - hinge loss
-
-            mask = None
-
-            if exists(episode_lens):
-                mask = lens_to_mask(episode_lens, seq_len)
-
-            actual_switch_rate = masked_mean(switch_beta, mask, dim = 1)
-
-            switch_loss = F.relu(actual_switch_rate - self.target_switch_rate).mean()
 
         # maybe hard switch, then use associative scan
 
@@ -453,7 +437,7 @@ class MetaController(Module):
             sampled_latent_action[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss, switch_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss)
 
 MetaController.policy_loss = policy_loss
 
@@ -698,7 +682,7 @@ class Transformer(Module):
 
             action_recon_loss = self.action_readout.calculate_loss(dist_params, target_actions)
 
-            losses = DiscoveryLosses(action_recon_loss, next_meta_hiddens.kl_loss, next_meta_hiddens.switch_loss)
+            losses = DiscoveryLosses(action_recon_loss, next_meta_hiddens.kl_loss)
 
             if not return_meta_controller_output:
                 return losses
