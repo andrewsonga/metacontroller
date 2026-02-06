@@ -6,7 +6,7 @@
 #   "metacontroller-pytorch>=0.0.57",
 #   "minigrid",
 #   "tqdm",
-#   "x-evolution",
+#   "x-evolution>=0.1.27",
 #   "einops",
 #   "sentence-transformers",
 #   "accelerate"
@@ -107,14 +107,6 @@ class BabyAIEnvironment(Module):
         cache = None
         past_action_id = None
 
-        # correctly unwrap model to access visual_encode
-        unwrapped_model = model
-        if exists(self.accelerator):
-            unwrapped_model = self.accelerator.unwrap_model(model)
-        
-        # also handle Noisable wrapper attribute blocking from x-evolution
-        unwrapped_model = getattr(unwrapped_model, 'model', unwrapped_model)
-
         episode_rewards = []
         episode_states = []
         episode_actions = []
@@ -127,7 +119,7 @@ class BabyAIEnvironment(Module):
 
             if self.use_resnet:
                 image_tensor = rearrange(image_tensor, 'h w c -> 1 1 h w c')
-                image_tensor = unwrapped_model.visual_encode(image_tensor)
+                image_tensor = model.visual_encode(image_tensor)
             else:
                 image_tensor = rearrange(image_tensor, 'h w c -> 1 1 (h w c)')
 
@@ -144,7 +136,7 @@ class BabyAIEnvironment(Module):
                     condition = mission_embed if self.condition_on_mission_embed else None
                 )
 
-            action = unwrapped_model.action_readout.sample(logits)
+            action = model.action_readout.sample(logits)
             past_action_id = action
             action_id = action.squeeze()
 
@@ -232,7 +224,8 @@ def main(
         noise_population_size = noise_population_size,
         noise_scale = noise_scale,
         learning_rate = learning_rate,
-        accelerator = accelerator
+        accelerator = accelerator,
+        sync_on_init = False
     )
 
     # save
