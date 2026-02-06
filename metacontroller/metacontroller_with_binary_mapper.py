@@ -65,7 +65,6 @@ class MetaControllerWithBinaryMapper(Module):
         *,
         dim_meta_controller = 256,
         dim_code_bits = 4,
-        switch_per_code = False,
         decoder_expansion_factor = 2.,
         decoder_depth = 1,
         hypernetwork_low_rank = 16,
@@ -78,11 +77,11 @@ class MetaControllerWithBinaryMapper(Module):
             attn_dim_head = 32,
             heads = 8
         ),
-        kl_loss_threshold = 0.
+        kl_loss_threshold = 0.,
+        reduce_policy_loss: bool | None = None
     ):
         super().__init__()
         self.dim_model = dim_model
-        assert not switch_per_code, 'switch_per_code is not supported for binary mapper'
 
         dim_meta = default(dim_meta_controller, dim_model)
 
@@ -119,10 +118,8 @@ class MetaControllerWithBinaryMapper(Module):
 
         # switching unit
 
-        self.switch_per_code = switch_per_code
-
         self.switching_unit = GRU(dim_meta + self.num_codes, dim_meta)
-        self.to_switching_unit_beta = nn.Linear(dim_meta, self.num_codes if switch_per_code else 1, bias = False)
+        self.to_switching_unit_beta = nn.Linear(dim_meta, 1, bias = False)
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
 
@@ -148,7 +145,7 @@ class MetaControllerWithBinaryMapper(Module):
         return dict(
             states = ('float', self.dim_model),
             log_probs = ('float', self.dim_code_bits),
-            switch_betas = ('float', self.num_codes if self.switch_per_code else 1),
+            switch_betas = ('float', 1),
             latent_actions = ('float', self.num_codes)
         )
 
@@ -329,10 +326,9 @@ class MetaControllerWithBinaryMapper(Module):
             sampled_codes[:, -1:]
         )
 
-        # squeeze out the last dimension of switch_beta if single gate for all codes
+        # squeeze out the last dimension of switch_beta
 
-        if not self.switch_per_code:
-            switch_beta = rearrange(switch_beta, '... 1 -> ...')
+        switch_beta = rearrange(switch_beta, '... 1 -> ...')
 
         return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss, switch_loss)
 

@@ -143,15 +143,6 @@ def policy_loss(
     action_dist = meta_controller.get_action_dist_for_internal_rl(state)
     new_log_probs = meta_controller.log_prob(action_dist, actions)
 
-    # maybe sum log probs if not switching per latent dim
-
-    if not meta_controller.switch_per_latent_dim:
-        new_log_probs = reduce(new_log_probs, 'b n d -> b n', 'sum')
-        old_log_probs = reduce(old_log_probs, 'b n d -> b n', 'sum')
-
-        if mask.ndim == 3 and mask.shape[-1] == 1:
-            mask = rearrange(mask, 'b n 1 -> b n')
-
     # calculate ratio
 
     ratio = (new_log_probs - old_log_probs).exp()
@@ -169,9 +160,14 @@ def policy_loss(
 
     # masking
 
+    if mask.ndim == 3:
+        mask = rearrange(mask, 'b n 1 -> b n')
+
     if exists(episode_lens):
-        mask, episode_mask = align_dims_left((mask, lens_to_mask(episode_lens, losses.shape[1])))
+        episode_mask = lens_to_mask(episode_lens, mask.shape[1])
         mask = mask & episode_mask
+
+    losses = reduce(losses, 'b n d -> b n', 'sum')
 
     return masked_mean(losses, mask)
 
@@ -194,7 +190,6 @@ class MetaController(Module):
         *,
         dim_meta_controller = 256,
         dim_latent = 128,
-        switch_per_latent_dim = False,
         decoder_expansion_factor = 2.,
         decoder_depth = 1,
         hypernetwork_low_rank = 16,
@@ -238,11 +233,9 @@ class MetaController(Module):
 
         # switching unit
 
-        self.switch_per_latent_dim = switch_per_latent_dim
-
         self.dim_latent = dim_latent
         self.switching_unit = GRU(dim_meta + dim_latent, dim_meta)
-        self.to_switching_unit_beta = nn.Linear(dim_meta, dim_latent if switch_per_latent_dim else 1, bias = False)
+        self.to_switching_unit_beta = nn.Linear(dim_meta, 1, bias = False)
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
 
@@ -268,7 +261,7 @@ class MetaController(Module):
         return dict(
             states = ('float', self.dim_model),
             log_probs = ('float', self.dim_latent),
-            switch_betas = ('float', self.dim_latent if self.switch_per_latent_dim else 1),
+            switch_betas = ('float', 1),
             latent_actions = ('float', self.dim_latent)
         )
 
@@ -438,10 +431,9 @@ class MetaController(Module):
             sampled_latent_action[:, -1:]
         )
 
-        # squeeze out the last dimension of switch_beta if single gate for all latent dimensions
+        # squeeze out the last dimension of switch_beta
 
-        if not self.switch_per_latent_dim:
-            switch_beta = rearrange(switch_beta, '... 1 -> ...')
+        switch_beta = rearrange(switch_beta, '... 1 -> ...')
 
         return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss, switch_loss)
 

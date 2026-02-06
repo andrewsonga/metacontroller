@@ -22,18 +22,13 @@ def exists(v):
 
 # test
 
-@param('use_binary_mapper_variant, switch_per_latent_dim', [
-    (False, False),
-    (False, True),
-    (True, False)
-])
+@param('use_binary_mapper_variant', (False, True))
 @param('accept_condition', (False, True))
 @param('action_discrete', (False, True))
 @param('variable_length', (False, True))
 @param('use_mingru', (False, True))
 def test_metacontroller(
     use_binary_mapper_variant,
-    switch_per_latent_dim,
     action_discrete,
     variable_length,
     use_mingru,
@@ -98,14 +93,12 @@ def test_metacontroller(
             dim_model = 512,
             dim_meta_controller = dim_meta,
             dim_latent = 128,
-            switch_per_latent_dim = switch_per_latent_dim,
             **action_proposer_kwargs
         )
     else:
         meta_controller = MetaControllerWithBinaryMapper(
             dim_model = 512,
             dim_meta_controller = dim_meta,
-            switch_per_code = switch_per_latent_dim,
             dim_code_bits = 8,
             **action_proposer_kwargs
         )
