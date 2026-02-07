@@ -52,6 +52,9 @@ def default(*args):
             return arg
     return None
 
+def straight_through(src, tgt):
+    return tgt + src - src.detach()
+
 # tensor helpers
 
 # action proposer wrapper
@@ -199,10 +202,12 @@ class MetaController(Module):
             attn_dim_head = 32,
             heads = 8
         ),
-        switch_temperature = 0.5
+        switch_temperature = 0.5,
+        hard_switch = None
     ):
         super().__init__()
         self.dim_model = dim_model
+        self.hard_switch = hard_switch
         
         dim_meta = default(dim_meta_controller, dim_model)
 
@@ -323,6 +328,7 @@ class MetaController(Module):
         residual_stream,
         cache: MetaControllerOutput | None = None,
         discovery_phase = False,
+        hard_switch: bool | None = None,
         temperature = 1.,
         episode_lens: Tensor | None = None
     ):
@@ -396,6 +402,14 @@ class MetaController(Module):
 
         switch_beta = (switch_beta_logit / self.switch_temperature).sigmoid()
         switch_beta = rearrange(switch_beta, '... 1 -> ...')
+
+        # maybe hard switch, then use associative scan
+
+        hard_switch = default(hard_switch, self.hard_switch, not discovery_phase)
+
+        if hard_switch:
+            hard_switch_beta = (switch_beta > 0.5).float()
+            switch_beta = straight_through(switch_beta, hard_switch_beta)
 
         # need to encourage normal distribution
 

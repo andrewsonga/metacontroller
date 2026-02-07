@@ -78,10 +78,12 @@ class MetaControllerWithBinaryMapper(Module):
             heads = 8
         ),
         kl_loss_threshold = 0.,
-        switch_temperature = 0.1
+        switch_temperature = 0.1,
+        hard_switch = None
     ):
         super().__init__()
         self.dim_model = dim_model
+        self.hard_switch = hard_switch
 
         dim_meta = default(dim_meta_controller, dim_model)
 
@@ -221,7 +223,7 @@ class MetaControllerWithBinaryMapper(Module):
 
         meta_embed = self.model_to_meta(residual_stream)
 
-        hard_switch = default(hard_switch, not discovery_phase) # think during internal RL phase, it needs to be a hard switch, then only the actions emitted during the switch is reinforced
+        hard_switch = default(hard_switch, self.hard_switch, not discovery_phase) # think during internal RL phase, it needs to be a hard switch, then only the actions emitted during the switch is reinforced
 
         if discovery_phase:
 
