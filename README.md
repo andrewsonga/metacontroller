@@ -54,7 +54,7 @@ meta_controller = MetaController(
     dim_latent = 128
 )
 
-state_pred_loss, action_recon_loss, kl_loss = model(
+state_pred_loss, action_recon_loss, kl_loss, aux_ratio_loss = model(
     state,
     actions,
     meta_controller = meta_controller,
@@ -62,6 +62,7 @@ state_pred_loss, action_recon_loss, kl_loss = model(
 )
 
 # they did not use state pred loss in the paper (weight set to 0, but available)
+# the ratio loss from h-net paper is also available, but optional (set ratio_loss_weight > 0)
 
 (action_recon_loss + kl_loss * 0.1).backward()
 
