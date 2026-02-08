@@ -180,6 +180,7 @@ def train(
     action_loss_weight = 1.,
     discovery_action_recon_loss_weight = 1.,
     discovery_kl_loss_weight = 0.15,
+    discovery_ratio_loss_weight = 0.,
     discovery_switch_warmup_steps = 1,
     discovery_switch_lr_scale = 0.1,
     discovery_obs_loss_weight = 0.0,
@@ -229,6 +230,7 @@ def train(
                 "env_id": env_id,
                 "state_loss_weight": state_loss_weight,
                 "action_loss_weight": action_loss_weight,
+                "discovery_ratio_loss_weight": discovery_ratio_loss_weight
             },
             init_kwargs = init_kwargs
         )
@@ -256,7 +258,7 @@ def train(
     accelerator.print(f"Detected state_dim: {state_dim}, num_actions: {num_actions} from env: {env_id}")
     accelerator.print(f"State shape from replay buffer: {state_shape}")
 
-    meta_controller = MetaController(dim, switch_temperature=switch_temperature)
+    meta_controller = MetaController(dim, switch_temperature=switch_temperature, ratio_loss_weight=discovery_ratio_loss_weight)
 
     transformer_class = TransformerWithResnet if use_resnet else Transformer
 
@@ -353,12 +355,13 @@ def train(
                 )
 
                 if is_discovering:
-                    obs_loss, action_recon_loss, kl_loss = losses
-
+                    obs_loss, action_recon_loss, kl_loss, ratio_loss = losses
+ 
                     loss = (
                         obs_loss * discovery_obs_loss_weight +
                         action_recon_loss * discovery_action_recon_loss_weight +
-                        kl_loss * discovery_kl_loss_weight
+                        kl_loss * discovery_kl_loss_weight +
+                        ratio_loss * discovery_ratio_loss_weight
                     )
 
                     warmup_factor = min(1.0, (gradient_step + 1) / discovery_switch_warmup_steps)
@@ -369,6 +372,7 @@ def train(
                         obs_loss=obs_loss.item(),
                         action_recon_loss=action_recon_loss.item(),
                         kl_loss=kl_loss.item(),
+                        ratio_loss=ratio_loss.item(),
                         switch_density=meta_controller_output.switch_beta.mean().item(),
                         switch_lr_warmup=warmup_factor,
                     )

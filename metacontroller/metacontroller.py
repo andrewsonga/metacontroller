@@ -96,7 +96,8 @@ BehavioralCloningLosses = namedtuple('BehavioralCloningLosses', (
 DiscoveryLosses = namedtuple('DiscoveryLosses', (
     'state_pred',
     'action_recon',
-    'kl'
+    'kl',
+    'ratio'
 ))
 
 # meta controller
@@ -107,7 +108,8 @@ MetaControllerOutput = namedtuple('MetaControllerOutput', (
     'action_dist',
     'actions',
     'switch_beta',
-    'kl_loss'
+    'kl_loss',
+    'ratio_loss'
 ))
 
 GRPOOutput = namedtuple('GRPOOutput', (
@@ -170,6 +172,31 @@ def policy_loss(
 
     return masked_mean(losses, mask)
 
+@move_inputs_to_module_device
+def ratio_loss(
+    meta_controller,
+    target_segment_len: int,
+    switch_beta,                # float[b n]
+    hard_switch_beta = None,    # bool[b n]
+    episode_lens = None,        # int[b]
+):
+    # Hwang et al. https://arxiv.org/abs/2507.07955 eq (10)
+
+    if not exists(hard_switch_beta):
+        hard_switch_beta = switch_beta > 0.5
+
+    seq_len = switch_beta.shape[-1]
+
+    mask = maybe(lens_to_mask)(episode_lens, seq_len)
+
+    N = target_segment_len
+    G = masked_mean(switch_beta, mask, dim = -1)
+    F = masked_mean(hard_switch_beta.float(), mask, dim = -1)
+
+    losses = (N / (N - 1.)) * ((N - 1.) * F * G + (1. - F) * (1. - G))
+
+    return losses.mean()
+
 def extract_grpo_data(meta_controller, transformer_output):
     meta_output = transformer_output.prev_hiddens.meta_controller
 
@@ -205,8 +232,9 @@ class MetaController(Module):
             heads = 8,
             polar_pos_emb = True
         ),
-        #switch_temperature = 0.5,
-        switch_temperature = 1.0,
+        switch_temperature = 1.,
+        target_temporal_segment_len = 4, # set to target segment length driven by ratio loss
+        ratio_loss_weight = 1.,
         hard_switch = None
     ):
         super().__init__()
@@ -249,6 +277,15 @@ class MetaController(Module):
         self.switch_temperature = switch_temperature
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
+
+        # turn off the ratio loss by setting the weight to 0
+
+        assert 0. <= ratio_loss_weight <= 1.
+
+        self.has_ratio_loss = ratio_loss_weight > 0.
+
+        self.ratio_loss_weight = ratio_loss_weight
+        self.target_temporal_segment_len = target_temporal_segment_len
 
         # decoder
 
@@ -407,14 +444,6 @@ class MetaController(Module):
         switch_beta = (switch_beta_logit / self.switch_temperature).sigmoid()
         switch_beta = rearrange(switch_beta, '... 1 -> ...')
 
-        # maybe hard switch, then use associative scan
-
-        hard_switch = default(hard_switch, self.hard_switch, not discovery_phase)
-
-        if hard_switch:
-            hard_switch_beta = (switch_beta > 0.5).float()
-            switch_beta = straight_through(switch_beta, hard_switch_beta)
-
         # need to encourage normal distribution
 
         kl_loss = self.zero
@@ -431,12 +460,21 @@ class MetaController(Module):
 
             kl_loss = kl_loss.sum(dim = -1).mean()
 
-        # maybe hard switch, then use associative scan
+        # maybe hard switch
 
-        forget_gate = 1. - switch_beta
-        input_gate = switch_beta
+        hard_switch = default(hard_switch, self.hard_switch, not discovery_phase)
 
-        gated_sampled_latent_action = einx.multiply('b n d, b n', sampled_latent_action, input_gate)
+        switch_beta_for_gate = switch_beta
+
+        if hard_switch:
+            hard_switch_beta = (switch_beta_for_gate > 0.5).float()
+            switch_beta_for_gate = straight_through(switch_beta_for_gate, hard_switch_beta)
+
+        # associative scan
+
+        forget_gate = 1. - switch_beta_for_gate
+
+        gated_sampled_latent_action = einx.multiply('b n d, b n', sampled_latent_action, switch_beta_for_gate)
         gated_action = self.switch_gating(forget_gate, gated_sampled_latent_action, prev = prev_switch_gated_hiddens)
 
         next_switch_gated_action = gated_action[:, -1]
@@ -452,6 +490,20 @@ class MetaController(Module):
 
         control_signal = einsum(residual_stream, hypernetwork_weight, '... d1, ... d1 d2 -> ... d1')
 
+        # maybe ratio loss
+
+        aux_ratio_loss = self.zero
+
+        if self.has_ratio_loss:
+
+            aux_ratio_loss = self.ratio_loss(
+                self.target_temporal_segment_len,
+                switch_beta,
+                episode_lens = episode_lens
+            )
+
+            aux_ratio_loss = aux_ratio_loss * self.ratio_loss_weight
+
         # returning
 
         next_hiddens = (
@@ -461,9 +513,10 @@ class MetaController(Module):
             sampled_latent_action[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, action_dist, sampled_latent_action, switch_beta, kl_loss, aux_ratio_loss)
 
 MetaController.policy_loss = policy_loss
+MetaController.ratio_loss = ratio_loss
 
 # main transformer, which is subsumed into the environment after behavioral cloning
 
@@ -697,9 +750,12 @@ class Transformer(Module):
             if return_residual_stream:
                 if not return_meta_controller_output:
                     return losses, residual_stream
+
                 return losses, next_meta_hiddens, residual_stream
+
             if not return_meta_controller_output:
                 return losses
+
             return losses, next_meta_hiddens
 
         elif discovery_phase:
@@ -712,7 +768,7 @@ class Transformer(Module):
             # action
             action_recon_loss = self.action_readout.calculate_loss(dist_params, target_actions)
 
-            losses = DiscoveryLosses(state_clone_loss, action_recon_loss, next_meta_hiddens.kl_loss)
+            losses = DiscoveryLosses(state_clone_loss, action_recon_loss, next_meta_hiddens.kl_loss, next_meta_hiddens.ratio_loss)
 
             if not return_meta_controller_output:
                 return losses
