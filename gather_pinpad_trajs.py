@@ -258,10 +258,14 @@ def get_mission_length(env_id, seed):
 
 
 class BabyAIBotEpsilonGreedy:
-    def __init__(self, env, random_action_prob = 0.):
+    def __init__(self, env, random_action_prob = 0., num_actions = None):
         self.expert = BabyAIBot(env)
         self.random_action_prob = random_action_prob
-        self.num_actions = env.action_space.n
+
+        if num_actions is not None:
+            self.num_actions = num_actions
+        else:
+            self.num_actions = env.action_space.n
         self.last_action = None
 
     def __call__(self, state):
@@ -273,7 +277,7 @@ class BabyAIBotEpsilonGreedy:
         self.last_action = action
         return action
 
-def collect_single_episode(env_id, obj_seq, seed, num_steps, random_action_prob, state_shape, one_hot=False, visualize=False):
+def collect_single_episode(env_id, obj_seq, seed, num_steps, random_action_prob, state_shape, one_hot=False, visualize=False, num_actions=None):
     """
     Collect a single episode of demonstrations.
     
@@ -303,7 +307,7 @@ def collect_single_episode(env_id, obj_seq, seed, num_steps, random_action_prob,
         episode_action = np.zeros(num_steps, dtype=np.float32)
         episode_label = -np.ones(num_steps, dtype=np.float32)     # these are the per-step subgoal labels (i.e. object indices)
 
-        expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob=random_action_prob)
+        expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob=random_action_prob, num_actions=num_actions)
 
         if visualize:
             frames = []
@@ -369,6 +373,7 @@ def collect_demonstrations(
     output_dir = "pinpad_demonstrations",
     visualize = False,
     one_hot = False,
+    num_actions = None,         # if the actual number of actions is different from the environment's action space, provide it here
 ):
     """
     Collect demonstrations using BabyAI Bot for the PinPad environment.
@@ -406,6 +411,7 @@ def collect_demonstrations(
     temp_env.close()
 
     logger.info(f"Detected state shape: {state_shape} for env {env_id}")
+    logger.info(f"num actions: {num_actions}")
 
     # Display object specs
     # i.e. which object index corresponds to which (type, color)
@@ -462,7 +468,7 @@ def collect_demonstrations(
                 obj_seq, seed = task
                 future = executor.submit(
                     collect_single_episode, env_id, obj_seq, seed, 
-                    num_steps, random_action_prob, state_shape, one_hot, visualize,
+                    num_steps, random_action_prob, state_shape, one_hot, visualize, num_actions
                 )
                 futures[future] = task
 
@@ -499,7 +505,7 @@ def collect_demonstrations(
                     obj_seq, seed = task
                     new_future = executor.submit(
                         collect_single_episode, env_id, obj_seq, seed,
-                        num_steps, random_action_prob, state_shape, visualize
+                        num_steps, random_action_prob, state_shape, one_hot, visualize, num_actions
                     )
                     futures[new_future] = task
 
