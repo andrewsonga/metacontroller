@@ -130,6 +130,7 @@ def train(
     depth = 2,
     heads = 8,
     dim_head = 64,
+    switch_temperature = 1.,
     use_wandb = False,
     wandb_project = "metacontroller-babyai-bc",
     checkpoint_path = "transformer_bc.pt",
@@ -219,7 +220,7 @@ def train(
 
     # meta controller
 
-    meta_controller = MetaController(dim)
+    meta_controller = MetaController(dim, switch_temperature = switch_temperature)
 
     # transformer
     

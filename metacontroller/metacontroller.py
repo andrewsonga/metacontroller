@@ -205,7 +205,8 @@ class MetaController(Module):
             heads = 8,
             polar_pos_emb = True
         ),
-        switch_temperature = 0.5,
+        #switch_temperature = 0.5,
+        switch_temperature = 1.0,
         hard_switch = None
     ):
         super().__init__()
@@ -575,6 +576,7 @@ class Transformer(Module):
         return_cache = False,
         episode_lens: Tensor | None = None,
         return_meta_controller_output = False,
+        return_residual_stream = False,
         condition = None
     ):
         device = state.device
@@ -692,9 +694,12 @@ class Transformer(Module):
 
             losses = BehavioralCloningLosses(state_clone_loss, action_clone_loss)
 
+            if return_residual_stream:
+                if not return_meta_controller_output:
+                    return losses, residual_stream
+                return losses, next_meta_hiddens, residual_stream
             if not return_meta_controller_output:
                 return losses
-
             return losses, next_meta_hiddens
 
         elif discovery_phase:

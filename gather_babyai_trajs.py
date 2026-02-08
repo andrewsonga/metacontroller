@@ -163,10 +163,16 @@ class RGBImgPartialObsWrapper(ObservationWrapper):
 # agent
 
 class BabyAIBotEpsilonGreedy:
-    def __init__(self, env, random_action_prob = 0.):
+    def __init__(self, env, random_action_prob = 0., num_actions = None):
         self.expert = BabyAIBot(env)
         self.random_action_prob = random_action_prob
-        self.num_actions = env.action_space.n
+
+        logger.info(f"num_actions: {num_actions}")
+
+        if num_actions is not None:
+            self.num_actions = num_actions
+        else:
+            self.num_actions = env.action_space.n
         self.last_action = None
 
     def __call__(self, state):
@@ -180,7 +186,7 @@ class BabyAIBotEpsilonGreedy:
 
 # functions
 
-def collect_single_episode(env_id, seed, num_steps, random_action_prob, state_shape):
+def collect_single_episode(env_id, seed, num_steps, random_action_prob, state_shape, num_actions=None):
     """
     Collect a single episode of demonstrations.
     Returns tuple of (episode_state, episode_action, success, episode_length, seed)
@@ -199,7 +205,7 @@ def collect_single_episode(env_id, seed, num_steps, random_action_prob, state_sh
         episode_state = np.zeros((num_steps, *state_shape), dtype=np.float32)
         episode_action = np.zeros(num_steps, dtype=np.float32)
 
-        expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob=random_action_prob)
+        expert = BabyAIBotEpsilonGreedy(env.unwrapped, random_action_prob=random_action_prob, num_actions=num_actions)
 
         for _step in range(num_steps):
             try:
@@ -233,7 +239,8 @@ def collect_demonstrations(
     num_workers = None,
     difficulty = "easy",
     output_dir = "babyai-minibosslevel-trajectories",
-    mission_embed_dim = 384
+    mission_embed_dim = 384,
+    num_actions = None,         # if the actual number of actions is different from the environment's action space, provide it here (for BabyAI-MiniBossLevel-v0, it's 4: https://minigrid.farama.org/environments/babyai/MiniBossLevel/)
 ):
     """
     The BabyAI Bot should be able to solve all BabyAI environments,
@@ -253,7 +260,7 @@ def collect_demonstrations(
     state_shape = temp_env.observation_space['rgb_image'].shape
     temp_env.close()
 
-    logger.info(f"Detected state shape: {state_shape} for env {env_id}")
+    logger.info(f"Detected state shape: {state_shape} for env {env_id} and num_actions: {num_actions}")
 
     if not exists(num_workers):
         num_workers = multiprocessing.cpu_count()
@@ -309,7 +316,7 @@ def collect_demonstrations(
         for _ in range(min(max_pending, len(all_seeds))):
             seed = next(seed_iter, None)
             if exists(seed):
-                future = executor.submit(collect_single_episode, env_id, seed, num_steps, random_action_prob, state_shape)
+                future = executor.submit(collect_single_episode, env_id, seed, num_steps, random_action_prob, state_shape, num_actions)
                 futures[future] = seed
 
         # collect
@@ -338,7 +345,7 @@ def collect_demonstrations(
 
                 seed = next(seed_iter, None)
                 if exists(seed):
-                    new_future = executor.submit(collect_single_episode, env_id, seed, num_steps, random_action_prob, state_shape)
+                    new_future = executor.submit(collect_single_episode, env_id, seed, num_steps, random_action_prob, state_shape, num_actions)
                     futures[new_future] = seed
 
     buffer.flush()

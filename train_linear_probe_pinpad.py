@@ -3,7 +3,7 @@
 #   "accelerate",
 #   "fire",
 #   "memmap-replay-buffer>=0.0.23",
-#   "metacontroller-pytorch>=0.1.0",
+#   "metacontroller-pytorch>=0.0.49",
 #   "torch",
 #   "einops",
 #   "tqdm",
@@ -14,12 +14,16 @@
 # ]
 # ///
 
+import logging
 import fire
 from tqdm import tqdm
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.nn import init
 import torch.nn as nn
@@ -82,6 +86,17 @@ def create_pinpad_env(env_id, num_objects, obj_seq, room_size, num_rows, num_col
     #env = OneHotFullyObsWrapper(env)
     env = FullyObsWrapper(env)
     return env
+
+
+class SubgoalProbe(nn.Module):
+    """Linear probe: residual stream (..., dim) -> subgoal logits (..., num_objects)."""
+
+    def __init__(self, dim: int, num_classes: int):
+        super().__init__()
+        self.linear = nn.Linear(dim, num_classes)
+
+    def forward(self, residual_stream: torch.Tensor) -> torch.Tensor:
+        return self.linear(residual_stream)
 
 
 def visualize_switch_betas_vs_labels(
@@ -154,15 +169,14 @@ def train(
     room_size = 8,
     num_rows = 1,
     num_cols = 1,
+    num_actions = None,
     # Training parameters
     cloning_epochs = 10,
-    discovery_epochs = 10,
+    probe_epochs = 5,
     batch_size = 128,
     gradient_accumulation_steps = None,
     lr = 1e-4,
-    discovery_lr = 1e-4,
     weight_decay = 0.03,
-    discovery_weight_decay = 0.03,
     dim = 512,
     depth = 2,
     heads = 8,
@@ -172,40 +186,29 @@ def train(
     wandb_project = "metacontroller-pinpad-bc",
     wandb_run_name = None,
     checkpoint_path = "transformer_pinpad_bc.pt",
-    meta_controller_checkpoint_path = "meta_controller_pinpad_discovery.pt",
     load_transformer_weights_path = None,
-    load_meta_controller_weights_path = None,
     save_steps = 1000,
     state_loss_weight = 1.,
     action_loss_weight = 1.,
-    discovery_action_recon_loss_weight = 1.,
-    discovery_kl_loss_weight = 0.15,
-    discovery_switch_warmup_steps = 1,
-    discovery_switch_lr_scale = 0.1,
-    discovery_obs_loss_weight = 0.0,
     max_grad_norm = 1.,
     use_resnet = False,
     condition_on_mission_embed = False,
-    mission_embed_dim = 384
+    mission_embed_dim = 384,
+    # Linear probe (subgoal prediction from residual stream, after BC)
+    probe_lr = 1e-3,
+    probe_checkpoint_path = "subgoal_probe_pinpad.pt",
+    load_probe_path = None,
 ):
-    def store_checkpoint(step: int | None = None, is_discovering: bool = False):
+
+    def store_checkpoint(step: int | None = None):
         if accelerator.is_main_process:
             if exists(step):
                 checkpoint_path_with_step = checkpoint_path.replace('.pt', f'_step_{step}.pt')
-                meta_controller_checkpoint_path_with_step = meta_controller_checkpoint_path.replace('.pt', f'_step_{step}.pt')
             else:
                 checkpoint_path_with_step = checkpoint_path
-                meta_controller_checkpoint_path_with_step = meta_controller_checkpoint_path
-
-            if not is_discovering:
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.save(checkpoint_path_with_step)
-
-            if is_discovering:
-                unwrapped_meta_controller = accelerator.unwrap_model(meta_controller)
-                unwrapped_meta_controller.save(meta_controller_checkpoint_path_with_step)
-
-            accelerator.print(f"Model saved to {checkpoint_path_with_step}, MetaController to {meta_controller_checkpoint_path_with_step}")
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.save(checkpoint_path_with_step)
+            accelerator.print(f"Model saved to {checkpoint_path_with_step}")
 
     # accelerator
 
@@ -219,7 +222,8 @@ def train(
             wandb_project,
             config = {
                 "cloning_epochs": cloning_epochs,
-                "discovery_epochs": discovery_epochs,
+                "probe_epochs": probe_epochs,
+                "probe_lr": probe_lr,
                 "batch_size": batch_size,
                 "lr": lr,
                 "dim": dim,
@@ -250,7 +254,8 @@ def train(
         state_dim = int(torch.tensor(state_shape).prod().item())
 
     temp_env = create_pinpad_env(env_id, num_objects, default_obj_seq, room_size, num_rows, num_cols)
-    num_actions = int(temp_env.action_space.n)
+    if num_actions is None:
+        num_actions = int(temp_env.action_space.n)
     temp_env.close()
 
     accelerator.print(f"Detected state_dim: {state_dim}, num_actions: {num_actions} from env: {env_id}")
@@ -286,46 +291,49 @@ def train(
                 child.apply(initialize_weights_xavier)
         accelerator.print("Initialized transformer with Xavier")
 
-    if exists(load_meta_controller_weights_path):
-        _path = Path(load_meta_controller_weights_path)
-        assert _path.exists(), f"load_meta_controller_weights_path {load_meta_controller_weights_path} does not exist"
-        if hasattr(meta_controller, "load"):
-            meta_controller.load(str(_path))
-        else:
-            state = torch.load(_path, map_location="cpu", weights_only=True)
-            meta_controller.load_state_dict(state, strict=False)
-        accelerator.print(f"Loaded meta_controller weights from {load_meta_controller_weights_path}")
-    else:
-        meta_controller.apply(initialize_weights_xavier)
-        accelerator.print("Initialized meta_controller with Xavier")
+    meta_controller.apply(initialize_weights_xavier)
+    accelerator.print("Initialized meta_controller with Xavier")
 
     optim_model = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    optim_meta_controller = AdamW([
-        {"params": meta_controller.discovery_parameters_non_switching(), "lr": discovery_lr},
-        {"params": meta_controller.discovery_parameters_switching_unit(), "lr": 0.0},
-    ], weight_decay=discovery_weight_decay)
+
+    probe = SubgoalProbe(dim=dim, num_classes=num_objects)
+    if exists(load_probe_path):
+        _path = Path(load_probe_path)
+        assert _path.exists(), f"load_probe_path {load_probe_path} does not exist"
+        state = torch.load(_path, map_location="cpu", weights_only=True)
+        probe.load_state_dict(state, strict=True)
+        accelerator.print(f"Loaded probe weights from {load_probe_path}")
+    optim_probe = AdamW(probe.parameters(), lr=probe_lr)
 
     # prepare
 
-    model, optim_model, optim_meta_controller, dataloader = accelerator.prepare(model, optim_model, optim_meta_controller, dataloader)
+    model, optim_model, probe, optim_probe, dataloader = accelerator.prepare(
+        model, optim_model, probe, optim_probe, dataloader
+    )
 
     # training
     gradient_step = 0
-    for epoch in range(cloning_epochs + discovery_epochs):
-
-        model.train()
+    for epoch in range(cloning_epochs + probe_epochs):
         from collections import defaultdict
         total_losses = defaultdict(float)
 
-        progress_bar = tqdm(dataloader, desc = f"Epoch {epoch}", disable = not accelerator.is_local_main_process)
+        is_probe = (epoch >= cloning_epochs)
+        if is_probe:
+            if epoch == cloning_epochs:
+                logger.info("Linear probing began.")
+            model.eval()
+            probe.train()
+        else:
+            if epoch == 0:
+                logger.info("Behavior cloning started.")
+            model.train()
 
-        is_discovering = (epoch >= cloning_epochs)  # discovery phase is BC with metacontroller tuning
-
-        optim = optim_model if not is_discovering else optim_meta_controller
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}", disable=not accelerator.is_local_main_process)
 
         for batch in progress_bar:
             states = batch['state'].float()
             actions = batch['action'].long()
+
             labels = batch.get('label')
             if labels is not None:
                 labels = labels.long()
@@ -336,110 +344,130 @@ def train(
             else:
                 mission_embeddings = None
 
-            if use_resnet: 
+            if use_resnet:
                 states = model.visual_encode(states)
             else: # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
                 states = rearrange(states, 'b t ... -> b t (...)')
 
-            with accelerator.accumulate(model):
-                losses, meta_controller_output = model(
-                    states,
-                    actions,
-                    episode_lens=episode_lens,
-                    discovery_phase=is_discovering,
-                    force_behavior_cloning=not is_discovering,
-                    return_meta_controller_output=True,
-                    condition=mission_embeddings,
-                )
+            if is_probe:
+                # Linear probe: get pre-control residual stream via BC forward (teacher-forced), then train probe
+                if labels is None:
+                    progress_bar.set_postfix(probe_skip="no_labels")
+                    continue
 
-                if is_discovering:
-                    obs_loss, action_recon_loss, kl_loss = losses
-
-                    loss = (
-                        obs_loss * discovery_obs_loss_weight +
-                        action_recon_loss * discovery_action_recon_loss_weight +
-                        kl_loss * discovery_kl_loss_weight
+                with torch.no_grad():
+                    _, residual_stream = model(
+                        states,
+                        actions,
+                        episode_lens=episode_lens,
+                        force_behavior_cloning=True,
+                        return_residual_stream=True,
+                        condition=mission_embeddings,
                     )
+                # residual_stream is (B, T-1, dim) from BC's state[:, :-1]
+                labels_probe = labels[:, :-1]  # (B, T-1) to align with residual_stream
+                logits = probe(residual_stream)  # (B, T-1, num_objects)
+                seq_len = logits.shape[1]
 
-                    warmup_factor = min(1.0, (gradient_step + 1) / discovery_switch_warmup_steps)
-                    switch_lr = discovery_lr * discovery_switch_lr_scale * warmup_factor
-                    optim_meta_controller.param_groups[1]["lr"] = switch_lr
-
-                    log = dict(
-                        obs_loss=obs_loss.item(),
-                        action_recon_loss=action_recon_loss.item(),
-                        kl_loss=kl_loss.item(),
-                        switch_density=meta_controller_output.switch_beta.mean().item(),
-                        switch_lr_warmup=warmup_factor,
-                    )
-
+                # Valid positions: within episode and label != -1 (explore)
+                if episode_lens is not None:
+                    ep_len_eff = (episode_lens - 1).clamp(min=0)
+                    within_episode = torch.arange(seq_len, device=logits.device)[None, :] < ep_len_eff[:, None]
                 else:
+                    within_episode = torch.ones(logits.shape[0], seq_len, dtype=torch.bool, device=logits.device)
+                valid = (labels_probe >= 0) & within_episode
+
+                if not valid.any():
+                    progress_bar.set_postfix(probe_skip="no_valid")
+                    continue
+
+                target = labels_probe.clone()
+                target[~valid] = -100
+                probe_loss = F.cross_entropy(
+                    logits.view(-1, num_objects),
+                    target.view(-1),
+                    ignore_index=-100,
+                )
+                if gradient_accumulation_steps is not None:
+                    probe_loss = probe_loss / gradient_accumulation_steps
+
+                pred = logits.argmax(dim=-1)
+                probe_acc = (pred[valid] == labels_probe[valid]).float().mean().item()
+
+                accelerator.backward(probe_loss)
+                grad_norm = torch.nn.utils.clip_grad_norm_(probe.parameters(), max_norm=max_grad_norm)
+                if gradient_accumulation_steps is None or gradient_step % gradient_accumulation_steps == 0:
+                    optim_probe.step()
+                    optim_probe.zero_grad()
+
+                log = dict(probe_loss=probe_loss.item(), probe_acc=probe_acc, probe_grad_norm=grad_norm.item())
+                prefix = "probe_phase"
+                loss_for_log = probe_loss
+                grad_norm_for_log = grad_norm.item()
+
+            else:
+                # Behavior cloning
+                with accelerator.accumulate(model):
+                    losses = model(
+                        states,
+                        actions,
+                        episode_lens=episode_lens,
+                        discovery_phase=False,
+                        force_behavior_cloning=True,
+                        return_meta_controller_output=False,
+                        condition=mission_embeddings,
+                    )
                     state_loss, action_loss = losses
 
                     loss = (
                         state_loss * state_loss_weight +
                         action_loss * action_loss_weight
                     )
+                    if gradient_accumulation_steps is not None:
+                        loss = loss / gradient_accumulation_steps
 
-                    log = dict(
-                        state_loss = state_loss.item(),
-                        action_loss = action_loss.item(),
-                    )
+                    accelerator.backward(loss)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                    if gradient_accumulation_steps is None or gradient_step % gradient_accumulation_steps == 0:
+                        optim_model.step()
+                        optim_model.zero_grad()
 
-                if gradient_accumulation_steps is not None:
-                    loss /= gradient_accumulation_steps
+                log = dict(state_loss=state_loss.item(), action_loss=action_loss.item())
+                prefix = "behavior_cloning"
+                loss_for_log = loss
+                grad_norm_for_log = grad_norm.item()
 
-                # backprop
-
-                accelerator.backward(loss)
-
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm = max_grad_norm)
-
-                if gradient_accumulation_steps is None or gradient_step % gradient_accumulation_steps == 0:
-                    optim.step()
-                    optim.zero_grad()
-
-            # log
-            
             for key, value in log.items():
                 total_losses[key] += value
 
-            if is_discovering: 
-                prefix = "discovery_phase"
-            else: 
-                prefix = "behavior_cloning"
-
             accelerator.log({
                 **log,
-                f"{prefix}_total_loss": loss.item(),
-                f"{prefix}_grad_norm": grad_norm.item()
+                f"{prefix}_total_loss": loss_for_log.item(),
+                f"{prefix}_grad_norm": grad_norm_for_log,
             })
-
             progress_bar.set_postfix(**log)
             gradient_step += 1
 
-            # checkpoint 
-
             if gradient_step % save_steps == 0:
                 accelerator.wait_for_everyone()
-                store_checkpoint(gradient_step, is_discovering)
-
-                if is_discovering and use_wandb and accelerator.is_main_process and labels is not None:
-                    visualize_switch_betas_vs_labels(
-                        switch_betas=meta_controller_output.switch_beta,
-                        labels=labels,
-                        episode_lens=episode_lens,
-                        gradient_step=gradient_step,
-                        num_samples=3,
-                    )
+                store_checkpoint(gradient_step)
+                if is_probe and accelerator.is_main_process:
+                    torch.save(accelerator.unwrap_model(probe).state_dict(), probe_checkpoint_path)
+                    accelerator.print(f"Probe saved to {probe_checkpoint_path}")
 
         avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
         avg_losses_str = ", ".join([f"{k}={v:.4f}" for k, v in avg_losses.items()])
         accelerator.print(f"Epoch {epoch}: {avg_losses_str}")
+        if not is_probe and epoch == cloning_epochs - 1:
+            logger.info("Behavior cloning ended.")
 
-     # save weights
+    # save weights
     accelerator.wait_for_everyone()
-    store_checkpoint(None, is_discovering)
+    store_checkpoint(None)
+    if accelerator.is_main_process:
+        unwrapped_probe = accelerator.unwrap_model(probe)
+        torch.save(unwrapped_probe.state_dict(), probe_checkpoint_path)
+        accelerator.print(f"Probe saved to {probe_checkpoint_path}")
 
     accelerator.end_training()
 
