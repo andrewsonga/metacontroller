@@ -20,6 +20,8 @@ $ pip install metacontroller-pytorch
 
 - [Diego Calanzone](https://github.com/ddidacus) for his experimental acumen, bringing the project to an initial [working state](https://github.com/lucidrains/metacontroller/pull/13) for the BabyAI environment!
 
+- [Andrew Song](https://github.com/andrewsonga) for implementing linear probing and fixing an issue with the action space
+
 ## Usage
 
 ```python
