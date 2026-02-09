@@ -74,56 +74,64 @@ def categorize_seeds_by_difficulty(env_id, num_seeds_per_level, level_difficulty
     """
     Scan seeds and categorize them by difficulty based on mission length.
     Also collects the mission string for each seed.
-    
+
     Args:
         env_id: Environment ID
-        num_seeds_per_level: Number of seeds needed per difficulty level
+        num_seeds_per_level: Number of seeds needed per difficulty level.
+            Either an int (same quota for all levels) or a list of ints
+            in the same order as level_difficulty.
         level_difficulty: List of levels to collect seeds for.
-                       Supported: 'easy', 'medium', 'hard'
-                       If None, collects for ['easy', 'hard'].
-    
+            Supported: 'easy', 'medium', 'hard'
+            If None, collects for ['easy', 'hard'].
+
     Returns:
         tuple of:
             - dict with keys for each requested level, each containing a list of seeds
             - dict mapping seed -> mission string
     """
-    
+    if level_difficulty is None:
+        level_difficulty = ['easy', 'hard']
+
+    if isinstance(num_seeds_per_level, int):
+        level_to_quota = {level: num_seeds_per_level for level in level_difficulty}
+    else:
+        level_to_quota = {level: num_seeds_per_level[i] for i, level in enumerate(level_difficulty)}
+
     seeds = {level: [] for level in level_difficulty}
     seed_to_mission = {}
-    
-    total_needed = sum(num_seeds_per_level for _ in level_difficulty)
-    print(f"Scanning seeds to categorize by difficulty (need {num_seeds_per_level} per level for {level_difficulty})...")
-    
+
+    total_needed = sum(level_to_quota[level] for level in level_difficulty)
+    print(f"Scanning seeds to categorize by difficulty (quotas {level_to_quota} for {level_difficulty})...")
+
     with tqdm(total=total_needed, desc="Categorizing seeds") as pbar:
         seed = 1
         all_done = False
         while not all_done:
-            # Check if we have enough seeds for all requested levels
-            all_done = all(len(seeds[level]) >= num_seeds_per_level for level in level_difficulty)
-            
+            all_done = all(len(seeds[level]) >= level_to_quota[level] for level in level_difficulty)
+
             try:
                 mission_length, mission = get_mission_for_seed(env_id, seed)
-                
+
                 # easy: mission length <= 30
-                if 'easy' in level_difficulty and mission_length <= EASY_MAX_LENGTH and len(seeds['easy']) < num_seeds_per_level:
+                if 'easy' in level_difficulty and mission_length <= EASY_MAX_LENGTH and len(seeds['easy']) < level_to_quota['easy']:
                     seeds['easy'].append(seed)
                     seed_to_mission[seed] = mission
                     pbar.update(1)
-                # medium: mission length <= 75 (combines easy and medium)
-                elif 'medium' in level_difficulty and mission_length > EASY_MAX_LENGTH and mission_length <= MEDIUM_MAX_LENGTH and len(seeds['medium']) < num_seeds_per_level:
+                # medium: mission length 30 < len <= 75
+                elif 'medium' in level_difficulty and mission_length > EASY_MAX_LENGTH and mission_length <= MEDIUM_MAX_LENGTH and len(seeds['medium']) < level_to_quota['medium']:
                     seeds['medium'].append(seed)
                     seed_to_mission[seed] = mission
                     pbar.update(1)
                 # hard: mission length > 75
-                elif 'hard' in level_difficulty and mission_length > MEDIUM_MAX_LENGTH and len(seeds['hard']) < num_seeds_per_level:
+                elif 'hard' in level_difficulty and mission_length > MEDIUM_MAX_LENGTH and len(seeds['hard']) < level_to_quota['hard']:
                     seeds['hard'].append(seed)
                     seed_to_mission[seed] = mission
                     pbar.update(1)
             except Exception as e:
                 logger.warning(f"Error getting mission for seed {seed}: {e}")
-            
+
             seed += 1
-    
+
     return seeds, seed_to_mission
 
 # wrapper, necessarily modified to allow for both rgb obs (policy) and symbolic obs (bot)
@@ -246,7 +254,22 @@ def collect_demonstrations(
     The BabyAI Bot should be able to solve all BabyAI environments,
     allowing us therefore to generate demonstrations.
     Parallelized version using ProcessPoolExecutor.
+
+    difficulty: single level ('easy', 'medium', 'hard') or a list of levels.
+        If a list, num_seeds is divided among the levels and seeds from all
+        levels are merged into the same output (same numpy files and seeds file).
     """
+
+    # Normalize difficulty to list and validate
+    if isinstance(difficulty, str):
+        difficulty = [difficulty]
+    assert all(d in ['easy', 'medium', 'hard'] for d in difficulty), f"difficulty must be in ['easy','medium','hard'], got {difficulty}"
+
+    # Divide num_seeds among difficulty levels (remainder goes to first levels)
+    n_levels = len(difficulty)
+    base = num_seeds // n_levels
+    remainder = num_seeds % n_levels
+    num_seeds_per_level = [base + (1 if i < remainder else 0) for i in range(n_levels)]
 
     # Register minigrid envs if not already registered
     if env_id not in gym.envs.registry:
@@ -267,16 +290,17 @@ def collect_demonstrations(
 
     total_episodes = num_seeds * num_episodes_per_seed
 
-    # filter seeds
-
-    assert difficulty in ['easy', 'medium', 'hard']
-    seeds, seed_to_mission = categorize_seeds_by_difficulty(env_id, num_seeds_per_level=num_seeds, level_difficulty=[difficulty])
+    # Filter seeds: collect per level with quotas, then merge
+    seeds, seed_to_mission = categorize_seeds_by_difficulty(
+        env_id, num_seeds_per_level=num_seeds_per_level, level_difficulty=difficulty
+    )
+    # Merge seeds from all difficulty levels (order: first level, then second, ...)
+    selected_seeds = [s for level in difficulty for s in seeds[level]]
 
     # pre-compute embeddings on master process (harder to handle with subprocesses)
 
     logger.info("Pre-computing mission embeddings with GPU...")
     sbert = get_sbert(local_files_only = False, device = "cuda" if torch.cuda.is_available() else "cpu")
-    selected_seeds = seeds[difficulty]
     missions = [seed_to_mission[s] for s in selected_seeds]
     embeddings = get_missions_embeddings(missions, sbert).cpu().numpy()
     seed_to_embedding = {s: embeddings[i] for i, s in enumerate(selected_seeds)}
@@ -305,7 +329,7 @@ def collect_demonstrations(
     )
 
     max_pending = num_workers
-    all_seeds = seeds[difficulty] * num_episodes_per_seed
+    all_seeds = selected_seeds * num_episodes_per_seed
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         seed_iter = iter(all_seeds)
@@ -351,7 +375,7 @@ def collect_demonstrations(
     buffer.flush()
     progressbar.close()
 
-    seeds_array = np.array(seeds[difficulty])
+    seeds_array = np.array(selected_seeds)
     seeds_path = output_folder / "seeds.npy"
     np.save(seeds_path, seeds_array)
 

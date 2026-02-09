@@ -9,18 +9,34 @@ uv run gather_babyai_trajs.py \
     --num_steps 500 \
     --output_dir end_to_end_trajectories \
     --env_id BabyAI-MiniBossLevel-v0 \
-    --num_actions 4
+    --num_actions 7
 
 # 2. Behavioral cloning
 echo "Training behavioral cloning model..."
 ACCELERATE_USE_CPU=true ACCELERATE_MIXED_PRECISION=no uv run train_behavior_clone_babyai.py \
-    --cloning_epochs 10 \
-    --discovery_epochs 10 \
-    --batch_size 256 \
     --input_dir end_to_end_trajectories \
     --env_id BabyAI-MiniBossLevel-v0 \
     --checkpoint_path end_to_end_model.pt \
-    --use_resnet
+    --lr 5e-5 \
+    --discovery_lr 5e-5 \
+    --batch_size 256 \
+    --cloning_epochs 10 --discovery_epochs 10 \
+    --switch_temperature 0.1 \
+    --state_loss_weight 0.001 \
+    --discovery_action_recon_loss_weight 1.0 \
+    --discovery_switch_warmup_steps 1 \
+    --discovery_switch_lr_scale 1.0 \
+    --discovery_kl_loss_weight 0.01 \
+    --discovery_obs_loss_weight 0.005 \
+    --discovery_ratio_loss_weight 1.0 \
+    --save_steps 500 \
+    --dim 256 \
+    --heads 8 \
+    --dim_head 64 \
+    --depth 6 \
+    --max_grad_norm 1.0 \
+    --condition_on_mission_embed \
+    --use_resnet --use_wandb
 
 # 3. Inference rollouts
 echo "Running inference rollouts..."

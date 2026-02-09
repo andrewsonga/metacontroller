@@ -24,6 +24,9 @@ import torch
 from torch import cat, tensor, stack, Tensor
 from torch.optim import Adam
 
+import matplotlib.pyplot as plt
+import wandb
+
 from einops import rearrange
 
 from torch_einops_utils import pad_sequence, pad_sequence_and_cat, lens_to_mask
@@ -85,6 +88,58 @@ def default(v, d):
 def divisible_by(num, den):
     return (num % den) == 0
 
+def visualize_switch_betas(
+    switch_betas,      # (B, T-1)
+    episode_lens,      # (B,) or None
+    gradient_step,
+    num_samples = 3
+):
+    """
+    Visualize switch betas for randomly sampled sequences in the batch.
+    Logs a single stacked figure to wandb.
+    """
+    B, T_minus_1 = switch_betas.shape
+    
+    # randomly sample sequences from the batch
+    num_samples = min(num_samples, B)
+    sample_indices = np.random.choice(B, size=num_samples, replace=False)
+    
+    # create figure with num_samples subplots
+    fig, axes = plt.subplots(num_samples, 1, figsize=(12, 3 * num_samples))
+    fig.suptitle(f'Step {gradient_step} | Switch Betas Visualization', fontsize=10)
+    
+    # handle single subplot case
+    if num_samples == 1:
+        axes = [axes]
+    
+    for i, idx in enumerate(sample_indices):
+        # get episode length for this sample (if available)
+        if episode_lens is not None:
+            ep_len = int(episode_lens[idx].item())
+        else:
+            ep_len = T_minus_1
+        
+        # extract data for this sample
+        sample_switch_betas = switch_betas[idx, :ep_len-1].detach().cpu()  # (T-1,)
+        
+        ax = axes[i]
+        
+        # plot switch betas
+        ax.plot(sample_switch_betas.numpy(), label='switch betas', linewidth=2)
+        ax.set_xlabel('timesteps')
+        ax.set_ylabel(f'switch betas (sample {idx})')
+        ax.legend(loc='upper right')
+    
+    plt.tight_layout()
+    
+    # log to wandb
+    wandb.log({
+        f"switch_betas/step_{gradient_step}": wandb.Image(fig)
+    }, step=gradient_step)
+    
+    plt.close(fig)
+
+
 
 # main
 
@@ -95,13 +150,14 @@ def main(
     num_episodes = int(10e6),
     max_timesteps = 500,
     render_every_eps = 1_000,
-    video_folder = './recordings',
+    video_folder = './recordings/',
     transformer_weights_path: str | None = None,
     meta_controller_weights_path: str | None = None,
     output_meta_controller_path = 'metacontroller_rl_trained.pt',
     use_resnet = False,
     lr = 3e-5,
     save_steps = 100,
+    eval_steps = 50,
     batch_size = 16,
     max_grad_norm = None,
     use_wandb = False,
@@ -386,6 +442,14 @@ def main(
 
         if gradient_step % save_steps == 0:
             store_checkpoint(gradient_step)
+
+        if gradient_step % eval_steps == 0:
+            visualize_switch_betas(
+                switch_betas = group_switch_betas,
+                episode_lens = episode_lens,
+                gradient_step = gradient_step,
+                num_samples = 3
+            )
 
     env.close()
 
