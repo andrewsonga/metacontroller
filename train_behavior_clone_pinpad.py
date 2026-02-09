@@ -354,8 +354,8 @@ def train(
 
             with accelerator.accumulate(model):
                 losses, meta_controller_output = model(
-                    states,
-                    actions,
+                    state=states,
+                    actions=actions,
                     episode_lens=episode_lens,
                     discovery_phase=is_discovering,
                     force_behavior_cloning=not is_discovering,

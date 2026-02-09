@@ -355,9 +355,7 @@ def train(
             else:
                 mission_embeddings = None
 
-            if use_resnet:
-                states = model.visual_encode(states)
-            else: # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
+            if not use_resnet: # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
                 states = rearrange(states, 'b t ... -> b t (...)')
 
             if is_probe:
@@ -368,8 +366,8 @@ def train(
  
                 with torch.no_grad():
                     _, residual_stream = model(
-                        states,
-                        actions,
+                        state=states,
+                        actions=actions,
                         episode_lens=episode_lens,
                         force_behavior_cloning=True,
                         return_residual_stream=True,
@@ -421,8 +419,8 @@ def train(
                 # Behavior cloning
                 with accelerator.accumulate(model):
                     losses, action_logits = model(
-                        states,
-                        actions,
+                        state=states,
+                        actions=actions,
                         episode_lens=episode_lens,
                         discovery_phase=False,
                         force_behavior_cloning=True,
