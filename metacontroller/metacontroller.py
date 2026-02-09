@@ -668,6 +668,7 @@ class Transformer(Module):
         episode_lens: Tensor | None = None,
         return_meta_controller_output = False,
         return_residual_stream = False,
+        return_action_logits = False,
         condition = None
     ):
         device = state.device
@@ -705,9 +706,15 @@ class Transformer(Module):
         if behavioral_cloning or discovery_phase: # during behavior cloning and discovery phase, the network is predicting / reconstructing the next token
 
             assert exists(actions), f'`actions` cannot be empty when doing discovery or behavioral cloning'
-
+            # states and actions are temporally aligned:
+            # state[t] = obs at time t (before taking action a_t)
+            # action[t] = action taken at time t from state[t]
+            # state[t+1] = obs at time t+1 (after taking action a_t)
+            # since the pretraining task is (current) action prediction and next-statep rediction
+            # target_actions = action[t]
             state, target_state = state[:, :-1], state[:, 1:]
-            actions, target_actions = actions[:, :-1], actions[:, 1:]
+            target_actions = actions[:, :-1]
+            #actions, target_actions = actions[:, :-1], actions[:, :-1]
 
             if exists(episode_lens):
                 episode_lens = (episode_lens - 1).clamp(min = 0)
@@ -734,7 +741,9 @@ class Transformer(Module):
             if action_embed.shape[-2] == (state_embed.shape[-2] - 1):
                 action_embed = pad_at_dim(action_embed, (1, 0), dim = 1)
 
-            embed = state_embed + action_embed
+            # following the paper: it doesn't make sense to use action as input to a model that's trained to predict the action
+            embed = state_embed
+            #embed = state_embed + action_embed
 
             residual_stream, next_lower_hiddens = self.lower_body(
                 embed,
@@ -773,18 +782,27 @@ class Transformer(Module):
         # maybe return behavior cloning loss
 
         if behavioral_cloning:
+            maybe_detach_target_state = torch.detach if self.state_loss_detach_target_state else identity
 
             loss_mask = maybe(lens_to_mask)(episode_lens, state.shape[1])
 
             # state
             state_dist_params = self.state_readout(attended)
-            state_clone_loss = self.state_readout.calculate_loss(state_dist_params, target_state, mask = loss_mask)
+            state_clone_loss = self.state_readout.calculate_loss(state_dist_params, maybe_detach_target_state(target_state), mask = loss_mask)
 
             # action
             action_clone_loss = self.action_readout.calculate_loss(dist_params, target_actions, mask = loss_mask)
 
             losses = BehavioralCloningLosses(state_clone_loss, action_clone_loss)
 
+            if return_action_logits:
+                if return_residual_stream:
+                    if not return_meta_controller_output:
+                        return losses, dist_params, residual_stream
+                    return losses, dist_params, next_meta_hiddens, residual_stream
+                if not return_meta_controller_output:
+                    return losses, dist_params
+                return losses, dist_params, next_meta_hiddens
             if return_residual_stream:
                 if not return_meta_controller_output:
                     return losses, residual_stream
