@@ -26,6 +26,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 from memmap_replay_buffer import ReplayBuffer
 from einops import rearrange
 
@@ -117,8 +118,8 @@ def visualize_switch_betas(
     plt.close(fig)
 
 def train(
-    input_dir = "babyai-minibosslevel-trajectories",
-    env_id = "BabyAI-MiniBossLevel-v0",
+    input_dir = None,
+    env_id = None,
     cloning_epochs = 10,
     discovery_epochs = 10,
     batch_size = 128,
@@ -128,7 +129,7 @@ def train(
     weight_decay = 0.03,
     discovery_weight_decay = 0.03,
     dim = 512,
-    depth = 2,
+    depth = 6,
     heads = 8,
     dim_head = 64,
     switch_temperature = 1.,
@@ -142,11 +143,11 @@ def train(
     state_loss_weight = 1.,
     action_loss_weight = 1.,
     discovery_action_recon_loss_weight = 1.,
+    discovery_obs_loss_weight = 1e-3,
     discovery_kl_loss_weight = 0.05,
-    discovery_ratio_loss_weight = 0.,
+    discovery_ratio_loss_weight = 1.0,
     discovery_switch_warmup_steps = 1,
     discovery_switch_lr_scale = 0.1,
-    discovery_obs_loss_weight = 0.0,
     max_grad_norm = 1.,
     use_resnet = False,
     condition_on_mission_embed = False,
@@ -174,9 +175,17 @@ def train(
 
             accelerator.print(f"Model saved to {checkpoint_path_with_step}, MetaController to {meta_controller_checkpoint_path_with_step}")
 
+
+    # check for yaml file
+    
+
     # accelerator
 
-    accelerator = Accelerator(log_with = "wandb" if use_wandb else None)
+    # DDP: some parameters are unused in BC-only steps (e.g. meta_controller) or conditional paths
+    accelerator = Accelerator(
+        log_with = "wandb" if use_wandb else None,
+        kwargs_handlers = [DistributedDataParallelKwargs(find_unused_parameters = True)],
+    )
 
     if use_wandb:
         accelerator.init_trackers(
@@ -238,6 +247,7 @@ def train(
         meta_controller = meta_controller,
         dim_condition = mission_embed_dim if condition_on_mission_embed else None
     )
+    if use_resnet: transformer_kwargs["use_layernorm"] = True # resnet won't suffer from grad. accum.
 
     model = transformer_class(**transformer_kwargs)
 
@@ -289,16 +299,16 @@ def train(
     gradient_step = 0
     for epoch in range(cloning_epochs + discovery_epochs):
 
-        if is_discovering:
-            model.train_discovery()
-        else:
-            model.train()
-
         total_losses = defaultdict(float)
 
         progress_bar = tqdm(dataloader, desc = f"Epoch {epoch}", disable = not accelerator.is_local_main_process)
 
         is_discovering = (epoch >= cloning_epochs) # discovery phase is BC with metacontroller tuning
+
+        if is_discovering:
+            model.train_discovery()
+        else:
+            model.train()
 
         optim = optim_model if not is_discovering else optim_meta_controller
 
@@ -317,18 +327,13 @@ def train(
             else:
                 mission_embeddings = None
 
-            # use resnet18 to embed visual observations
-
-            if use_resnet: 
-                states = model.visual_encode(states)
-            else: # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
-                states = rearrange(states, 'b t ... -> b t (...)')
-
+            # flatten state: (B, T, 7, 7, 3) -> (B, T, 147)
+            if not use_resnet: states = rearrange(states, 'b t ... -> b t (...)')
 
             with accelerator.accumulate(model):
                 losses, meta_controller_output = model(
-                    states,
-                    actions,
+                    state=states,
+                    actions=actions,
                     episode_lens = episode_lens,
                     discovery_phase = is_discovering,
                     force_behavior_cloning = not is_discovering,
@@ -386,21 +391,25 @@ def train(
                     optim.step()
                     optim.zero_grad()
 
-            # log
+            # log on backprop
+
+            if gradient_accumulation_steps is None or gradient_step % gradient_accumulation_steps == 0:
             
-            for key, value in log.items():
-                total_losses[key] += value
+                for key, value in log.items():
+                    total_losses[key] += value
 
-            if is_discovering: prefix = "discovery_phase"
-            else: prefix = "behavior_cloning"
+                if is_discovering: prefix = "discovery_phase"
+                else: prefix = "behavior_cloning"
 
-            accelerator.log({
-                **log,
-                f"{prefix}_total_loss": loss.item(),
-                f"{prefix}_grad_norm": grad_norm.item()
-            })
+                accelerator.log({
+                    **log,
+                    f"{prefix}_total_loss": loss.item(),
+                    f"{prefix}_grad_norm": grad_norm.item()
+                }, step=gradient_step)
 
-            progress_bar.set_postfix(**log)
+                progress_bar.set_postfix(**log)
+
+
             gradient_step += 1
 
             # checkpoint 

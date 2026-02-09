@@ -218,6 +218,10 @@ class TransformerWithResnet(Transformer):
 
             self.attn = Encoder(**encoder_kwargs)
 
+    def forward(self, **kwargs):
+        kwargs["state"] = self.visual_encode(kwargs["state"])
+        return super().forward(**kwargs)
+
     def visual_encode(self, x):
         if self.is_channel_last:
             x = rearrange(x, '... h w c -> ... c h w')
