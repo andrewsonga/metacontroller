@@ -42,7 +42,7 @@ import gymnasium as gym
 from gymnasium.envs.registration import register
 
 # Import PinPad environment classes from gather_pinpad_trajs.py
-from minigrid.wrappers import FullyObsWrapper
+from minigrid.wrappers import RGBImgObsWrapper
 from gather_pinpad_trajs import PinPad, OneHotFullyObsWrapper
 
 # ============================================================================
@@ -84,7 +84,7 @@ def create_pinpad_env(env_id, num_objects, obj_seq, room_size, num_rows, num_col
     
     env = gym.make(env_id, obj_seq=obj_seq)
     #env = OneHotFullyObsWrapper(env)
-    env = FullyObsWrapper(env)
+    env = RGBImgObsWrapper(env)
     return env
 
 
@@ -192,12 +192,14 @@ def train(
     action_loss_weight = 1.,
     max_grad_norm = 1.,
     use_resnet = False,
+    resnet_type = 'resnet18',
     condition_on_mission_embed = False,
     mission_embed_dim = 384,
     # Linear probe (subgoal prediction from residual stream, after BC)
     probe_lr = 1e-3,
     probe_checkpoint_path = "subgoal_probe_pinpad.pt",
     load_probe_path = None,
+    use_layernorm = False,
 ):
 
     def store_checkpoint(step: int | None = None):
@@ -272,6 +274,9 @@ def train(
         lower_body=dict(depth=depth, heads=heads, attn_dim_head=dim_head),
         upper_body=dict(depth=depth, heads=heads, attn_dim_head=dim_head),
         meta_controller=meta_controller,
+        use_layernorm=use_layernorm,
+        resnet_type=resnet_type if use_resnet else None,
+        encoder_kwargs=dict(depth=depth, heads=heads, attn_dim_head=dim_head)
     )
 
     model = transformer_class(**transformer_kwargs)
@@ -331,13 +336,27 @@ def train(
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}", disable=not accelerator.is_local_main_process)
 
         for batch in progress_bar:
+
+            # normalize inputs to be first in [0, 1] by dividing by 255
+            # then normalize w.r.t. mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]
             states = batch['state'].float()
+            states = torch.clamp(states / 255.0, min=0.0, max=1.0)
+            # this step may need broadcasting to handle different no. of dims
+            states = (states - torch.tensor([0.485, 0.456, 0.406]).to(states.device)) / torch.tensor([0.229, 0.224, 0.225]).to(states.device)
+
             actions = batch['action'].long()
 
             labels = batch.get('label')
             if labels is not None:
                 labels = labels.long()
             episode_lens = batch.get('_lens')
+
+            # let's crop states, actions, and labels to the minimum episode length
+            episode_lens = episode_lens.clamp(max=episode_lens.min().item())
+            states = states[:, :episode_lens.min().item()]
+            actions = actions[:, :episode_lens.min().item()]
+            if labels is not None:
+                labels = labels[:, :episode_lens.min().item()]
 
             if condition_on_mission_embed and exists(mission_embeddings):
                 mission_embeddings = mission_embeddings.to(accelerator.device)
@@ -354,7 +373,7 @@ def train(
                 if labels is None:
                     progress_bar.set_postfix(probe_skip="no_labels")
                     continue
-
+ 
                 with torch.no_grad():
                     _, residual_stream = model(
                         states,
@@ -367,12 +386,13 @@ def train(
                 # residual_stream is (B, T-1, dim) from BC's state[:, :-1]
                 labels_probe = labels[:, :-1]  # (B, T-1) to align with residual_stream
                 logits = probe(residual_stream)  # (B, T-1, num_objects)
-                seq_len = logits.shape[1]
+                #seq_len = logits.shape[1]
+                seq_len = episode_lens.min().item()
 
                 # Valid positions: within episode and label != -1 (explore)
                 if episode_lens is not None:
                     ep_len_eff = (episode_lens - 1).clamp(min=0)
-                    within_episode = torch.arange(seq_len, device=logits.device)[None, :] < ep_len_eff[:, None]
+                    within_episode = torch.arange(seq_len-1, device=logits.device)[None, :] < ep_len_eff[:, None]
                 else:
                     within_episode = torch.ones(logits.shape[0], seq_len, dtype=torch.bool, device=logits.device)
                 valid = (labels_probe >= 0) & within_episode
@@ -408,13 +428,14 @@ def train(
             else:
                 # Behavior cloning
                 with accelerator.accumulate(model):
-                    losses = model(
+                    losses, action_logits = model(
                         states,
                         actions,
                         episode_lens=episode_lens,
                         discovery_phase=False,
                         force_behavior_cloning=True,
                         return_meta_controller_output=False,
+                        return_action_logits=True,
                         condition=mission_embeddings,
                     )
                     state_loss, action_loss = losses
@@ -426,13 +447,24 @@ def train(
                     if gradient_accumulation_steps is not None:
                         loss = loss / gradient_accumulation_steps
 
+                    # Action prediction accuracy (aligns with model: state[:, :-1] -> target_actions = actions[:, :-1])
+                    target_actions = actions[:, :-1]
+                    pred_actions = action_logits.argmax(dim=-1)
+                    seq_len = action_logits.shape[1]
+                    if episode_lens is not None:
+                        ep_len_eff = (episode_lens - 1).clamp(min=0)
+                        within_episode = torch.arange(seq_len, device=action_logits.device)[None, :] < ep_len_eff[:, None]
+                    else:
+                        within_episode = torch.ones(action_logits.shape[0], seq_len, dtype=torch.bool, device=action_logits.device)
+                    action_acc = (pred_actions[:, :episode_lens.min().item() - 1] == target_actions[:, :episode_lens.min().item() - 1]).float().mean().item()
+
                     accelerator.backward(loss)
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                     if gradient_accumulation_steps is None or gradient_step % gradient_accumulation_steps == 0:
                         optim_model.step()
                         optim_model.zero_grad()
 
-                log = dict(state_loss=state_loss.item(), action_loss=action_loss.item())
+                log = dict(state_loss=state_loss.item(), action_loss=action_loss.item(), action_acc=action_acc)
                 prefix = "behavior_cloning"
                 loss_for_log = loss
                 grad_norm_for_log = grad_norm.item()
