@@ -550,7 +550,8 @@ class Transformer(Module):
         lower_body: Decoder | dict,
         upper_body: Decoder | dict,
         meta_controller: MetaController | None = None,
-        dim_condition = None
+        dim_condition = None,
+        state_loss_detach_target_state = True
     ):
         super().__init__()
 
@@ -592,6 +593,10 @@ class Transformer(Module):
         # meta controller
 
         self.meta_controller = meta_controller 
+
+        # detaching the target state for the state loss - for the visual encoder based latent state ar prediction
+
+        self.state_loss_detach_target_state = state_loss_detach_target_state
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
@@ -793,12 +798,16 @@ class Transformer(Module):
 
         elif discovery_phase:
 
-            # state 
+            maybe_detach_target_state = torch.detach if self.state_loss_detach_target_state else identity
+
+            # state
+
             loss_mask = maybe(lens_to_mask)(episode_lens, state.shape[1])
             state_dist_params = self.state_readout(attended)
-            state_clone_loss = self.state_readout.calculate_loss(state_dist_params, target_state, mask = loss_mask)
+            state_clone_loss = self.state_readout.calculate_loss(state_dist_params, maybe_detach_target_state(target_state), mask = loss_mask)
 
             # action
+
             action_recon_loss = self.action_readout.calculate_loss(dist_params, target_actions)
 
             losses = DiscoveryLosses(state_clone_loss, action_recon_loss, next_meta_hiddens.kl_loss, next_meta_hiddens.ratio_loss)
