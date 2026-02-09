@@ -90,6 +90,7 @@ class BabyAIEnvironment(Module):
         )
 
     def forward(self, model):
+        model.eval()
 
         device = module_device(model)
 
@@ -217,6 +218,8 @@ def main(
     )
 
     # evolve
+
+    model.train_internal_rl(eval_rest = True)
 
     model.evolve(
         num_generations = num_generations,
