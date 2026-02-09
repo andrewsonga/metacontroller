@@ -203,6 +203,7 @@ def main(
     pbar = tqdm(range(num_batch_updates), desc = 'training')
     
     print("starting training")
+    unwrapped_model.eval()
 
     for gradient_step in pbar:
 
@@ -346,7 +347,7 @@ def main(
 
         # learn on this group directly (on-policy GRPO)
 
-        meta_controller.train()
+        meta_controller.train_internal_rl(eval_rest = True)
 
         loss = meta_controller.policy_loss(
             group_states,

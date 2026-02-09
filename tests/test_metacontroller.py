@@ -105,8 +105,8 @@ def test_metacontroller(
 
     # discovery phase
 
-    (_, action_recon_loss, kl_loss) = model(state, actions, condition = condition, meta_controller = meta_controller, discovery_phase = True, episode_lens = episode_lens)
-    (action_recon_loss + kl_loss * 0.1).backward()
+    (_, action_recon_loss, kl_loss, ratio_loss) = model(state, actions, condition = condition, meta_controller = meta_controller, discovery_phase = True, episode_lens = episode_lens)
+    (action_recon_loss + kl_loss * 0.1 + ratio_loss * 0.1).backward()
 
     # internal rl - done iteratively
 

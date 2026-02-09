@@ -30,7 +30,7 @@ from torch_einops_utils.save_load import save_load
 
 from vector_quantize_pytorch import BinaryMapper
 
-from metacontroller.metacontroller import MetaControllerOutput, policy_loss
+from metacontroller.metacontroller import MetaControllerOutput, policy_loss, ratio_loss
 
 # constants
 
@@ -83,6 +83,8 @@ class MetaControllerWithBinaryMapper(Module):
         ),
         kl_loss_threshold = 0.,
         switch_temperature = 0.1,
+        target_temporal_segment_len = 4, # set to target segment length driven by ratio loss
+        ratio_loss_weight = 1.,
         hard_switch = None
     ):
         super().__init__()
@@ -132,6 +134,15 @@ class MetaControllerWithBinaryMapper(Module):
 
         self.switch_gating = AssocScan(**assoc_scan_kwargs)
 
+        # turn off the ratio loss by setting the weight to 0
+
+        assert 0. <= ratio_loss_weight <= 1.
+
+        self.has_ratio_loss = ratio_loss_weight > 0.
+
+        self.ratio_loss_weight = ratio_loss_weight
+        self.target_temporal_segment_len = target_temporal_segment_len
+
         # decoder
 
         assert hypernetwork_low_rank < self.num_codes
@@ -176,6 +187,13 @@ class MetaControllerWithBinaryMapper(Module):
             *self.action_proposer.parameters(),
             *self.proposer_to_binary_logits.parameters()
         ]
+
+    def train_internal_rl(self, eval_rest = False):
+        if eval_rest:
+            self.eval()
+
+        self.action_proposer.train()
+        self.proposer_to_binary_logits.train()
 
     def get_action_dist_for_internal_rl(
         self,
@@ -302,16 +320,17 @@ class MetaControllerWithBinaryMapper(Module):
 
         # maybe hard switch, then use associative scan
 
-        if hard_switch:
-            hard_switch_beta = (switch_beta > 0.5).float()
-            switch_beta = straight_through(switch_beta, hard_switch_beta)
+        switch_beta_for_gate = switch_beta
 
-        forget_gate = 1. - switch_beta
-        input_gate = switch_beta
+        if hard_switch:
+            hard_switch_beta = (switch_beta_for_gate > 0.5).float()
+            switch_beta_for_gate = straight_through(switch_beta_for_gate, hard_switch_beta)
+
+        forget_gate = 1. - switch_beta_for_gate
 
         # gated codes (or soft distribution)
 
-        gated_sampled_codes = einx.multiply('b n d, b n', sampled_codes, input_gate)
+        gated_sampled_codes = einx.multiply('b n d, b n', sampled_codes, switch_beta_for_gate)
 
         gated_codes = self.switch_gating(forget_gate, gated_sampled_codes, prev = prev_switch_gated_hiddens)
 
@@ -328,6 +347,20 @@ class MetaControllerWithBinaryMapper(Module):
 
         control_signal = einsum(residual_stream, hypernetwork_weight, '... d1, ... d1 d2 -> ... d1')
 
+        # maybe ratio loss
+
+        aux_ratio_loss = self.zero
+
+        if self.has_ratio_loss:
+
+            aux_ratio_loss = self.ratio_loss(
+                self.target_temporal_segment_len,
+                switch_beta,
+                episode_lens = episode_lens
+            )
+
+            aux_ratio_loss = aux_ratio_loss * self.ratio_loss_weight
+
         # returning
 
         next_hiddens = (
@@ -337,6 +370,7 @@ class MetaControllerWithBinaryMapper(Module):
             sampled_codes[:, -1:]
         )
 
-        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss)
+        return control_signal, MetaControllerOutput(next_hiddens, residual_stream, binary_logits, sampled_codes, switch_beta, kl_loss, aux_ratio_loss)
 
 MetaControllerWithBinaryMapper.policy_loss = policy_loss
+MetaControllerWithBinaryMapper.ratio_loss = ratio_loss

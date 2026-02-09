@@ -18,6 +18,7 @@
 import fire
 from tqdm import tqdm
 from pathlib import Path
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -142,6 +143,7 @@ def train(
     action_loss_weight = 1.,
     discovery_action_recon_loss_weight = 1.,
     discovery_kl_loss_weight = 0.05,
+    discovery_ratio_loss_weight = 0.,
     discovery_switch_warmup_steps = 1,
     discovery_switch_lr_scale = 0.1,
     discovery_obs_loss_weight = 0.0,
@@ -190,7 +192,8 @@ def train(
                 "dim_head": dim_head,
                 "env_id": env_id,
                 "state_loss_weight": state_loss_weight,
-                "action_loss_weight": action_loss_weight
+                "action_loss_weight": action_loss_weight,
+                "discovery_ratio_loss_weight": discovery_ratio_loss_weight
             }
         )
 
@@ -220,7 +223,7 @@ def train(
 
     # meta controller
 
-    meta_controller = MetaController(dim, switch_temperature = switch_temperature)
+    meta_controller = MetaController(dim, switch_temperature = switch_temperature, ratio_loss_weight = discovery_ratio_loss_weight)
 
     # transformer
     
@@ -286,8 +289,11 @@ def train(
     gradient_step = 0
     for epoch in range(cloning_epochs + discovery_epochs):
 
-        model.train()
-        from collections import defaultdict
+        if is_discovering:
+            model.train_discovery()
+        else:
+            model.train()
+
         total_losses = defaultdict(float)
 
         progress_bar = tqdm(dataloader, desc = f"Epoch {epoch}", disable = not accelerator.is_local_main_process)
@@ -331,12 +337,13 @@ def train(
                 )
 
                 if is_discovering:
-                    obs_loss, action_recon_loss, kl_loss = losses
+                    obs_loss, action_recon_loss, kl_loss, ratio_loss = losses
 
                     loss = (
                         obs_loss * discovery_obs_loss_weight + 
                         action_recon_loss * discovery_action_recon_loss_weight +
-                        kl_loss * discovery_kl_loss_weight
+                        kl_loss * discovery_kl_loss_weight +
+                        ratio_loss * discovery_ratio_loss_weight
                     )
 
                     # LR warmup + permanent scale for switching unit: ramp to discovery_lr * scale over warmup, then stay there
@@ -348,6 +355,7 @@ def train(
                         obs_loss = obs_loss.item(),
                         action_recon_loss = action_recon_loss.item(),
                         kl_loss = kl_loss.item(),
+                        ratio_loss = ratio_loss.item(),
                         switch_density = meta_controller_output.switch_beta.mean().item(),
                         switch_lr_warmup = warmup_factor,
                     )

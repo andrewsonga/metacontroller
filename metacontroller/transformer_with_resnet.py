@@ -11,6 +11,18 @@ from metacontroller.metacontroller import Transformer, Encoder
 from torch_einops_utils import pack_with_inverse
 from torch_einops_utils.save_load import save_load
 
+# normalization
+
+class LayerNorm2d(Module):
+    def __init__(self, dim, bias = False):
+        super().__init__()
+        self.layernorm = nn.LayerNorm(dim, bias = bias)
+
+    def forward(self, x):
+        x = rearrange(x, 'b c h w -> b h w c')
+        x = self.layernorm(x)
+        return rearrange(x, 'b h w c -> b c h w')
+
 # resnet components
 
 def exists(v):
@@ -24,14 +36,15 @@ class BasicBlock(Module):
         dim,
         dim_out,
         stride = 1,
-        downsample: Module | None = None
+        downsample: Module | None = None,
+        use_layernorm = False
     ):
         super().__init__()
         self.conv1 = nn.Conv2d(dim, dim_out, 3, stride = stride, padding = 1, bias = False)
-        self.bn1 = nn.BatchNorm2d(dim_out)
+        self.bn1 = LayerNorm2d(dim_out) if use_layernorm else nn.BatchNorm2d(dim_out)
         self.relu = nn.ReLU(inplace = True)
         self.conv2 = nn.Conv2d(dim_out, dim_out, 3, padding = 1, bias = False)
-        self.bn2 = nn.BatchNorm2d(dim_out)
+        self.bn2 = LayerNorm2d(dim_out) if use_layernorm else nn.BatchNorm2d(dim_out)
         self.downsample = downsample
 
     def forward(self, x: Tensor) -> Tensor:
@@ -58,16 +71,17 @@ class Bottleneck(Module):
         dim,
         dim_out,
         stride = 1,
-        downsample: Module | None = None
+        downsample: Module | None = None,
+        use_layernorm = False
     ):
         super().__init__()
         width = dim_out # simple resnet shortcut
         self.conv1 = nn.Conv2d(dim, width, 1, bias = False)
-        self.bn1 = nn.BatchNorm2d(width)
+        self.bn1 = LayerNorm2d(width) if use_layernorm else nn.BatchNorm2d(width)
         self.conv2 = nn.Conv2d(width, width, 3, stride = stride, padding = 1, bias = False)
-        self.bn2 = nn.BatchNorm2d(width)
+        self.bn2 = LayerNorm2d(width) if use_layernorm else nn.BatchNorm2d(width)
         self.conv3 = nn.Conv2d(width, dim_out * self.expansion, 1, bias = False)
-        self.bn3 = nn.BatchNorm2d(dim_out * self.expansion)
+        self.bn3 = LayerNorm2d(dim_out * self.expansion) if use_layernorm else nn.BatchNorm2d(dim_out * self.expansion)
         self.relu = nn.ReLU(inplace = True)
         self.downsample = downsample
 
@@ -97,13 +111,15 @@ class ResNet(Module):
         block: type[BasicBlock | Bottleneck],
         layers: list[int],
         num_classes = 1000,
-        channels = 3
+        channels = 3,
+        use_layernorm = False
     ):
         super().__init__()
         self.inplanes = 64
+        self.use_layernorm = use_layernorm
 
         self.conv1 = nn.Conv2d(channels, 64, kernel_size = 7, stride = 2, padding = 3, bias = False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.bn1 = LayerNorm2d(64) if use_layernorm else nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace = True)
         self.maxpool = nn.MaxPool2d(kernel_size = 3, stride = 2, padding = 1)
 
@@ -127,14 +143,14 @@ class ResNet(Module):
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
                 nn.Conv2d(self.inplanes, planes * block.expansion, 1, stride = stride, bias = False),
-                nn.BatchNorm2d(planes * block.expansion),
+                LayerNorm2d(planes * block.expansion) if self.use_layernorm else nn.BatchNorm2d(planes * block.expansion),
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
+        layers.append(block(self.inplanes, planes, stride, downsample, use_layernorm = self.use_layernorm))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, use_layernorm = self.use_layernorm))
 
         return nn.Sequential(*layers)
 
@@ -161,14 +177,14 @@ class ResNet(Module):
 
 # resnet factory
 
-def resnet18(num_classes = 1000):
-    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes)
+def resnet18(num_classes = 1000, use_layernorm = False):
+    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes, use_layernorm = use_layernorm)
 
-def resnet34(num_classes = 1000):
-    return ResNet(BasicBlock, [3, 4, 6, 3], num_classes)
+def resnet34(num_classes = 1000, use_layernorm = False):
+    return ResNet(BasicBlock, [3, 4, 6, 3], num_classes, use_layernorm = use_layernorm)
 
-def resnet50(num_classes = 1000):
-    return ResNet(Bottleneck, [3, 4, 6, 3], num_classes)
+def resnet50(num_classes = 1000, use_layernorm = False):
+    return ResNet(Bottleneck, [3, 4, 6, 3], num_classes, use_layernorm = use_layernorm)
 
 # transformer with resnet
 
@@ -179,6 +195,7 @@ class TransformerWithResnet(Transformer):
         *args,
         resnet_type = 'resnet18',
         is_channel_last = True,
+        use_layernorm = False,
         encoder_kwargs: dict | None = None,
         **kwargs
     ):
@@ -192,7 +209,7 @@ class TransformerWithResnet(Transformer):
             resnet_klass = resnet50
 
         self.resnet_dim = kwargs['state_embed_readout']['num_continuous']
-        self.visual_encoder = resnet_klass(num_classes = self.resnet_dim)
+        self.visual_encoder = resnet_klass(num_classes = self.resnet_dim, use_layernorm = use_layernorm)
 
         self.attn = None
         if exists(encoder_kwargs):
