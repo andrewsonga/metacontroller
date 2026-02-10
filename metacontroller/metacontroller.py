@@ -9,11 +9,6 @@ import torch
 from torch import nn, cat, stack, tensor, Tensor
 from torch.nn import Module, GRU, Linear, Identity
 
-
-class _IdentityWithKwargs(Module):
-    """Identity that accepts **kwargs so it can be used as final_norm when condition is passed (e.g. DDP)."""
-    def forward(self, x, **kwargs):
-        return x
 import torch.nn.functional as F
 
 # einops
@@ -25,7 +20,7 @@ from einops.layers.torch import Rearrange
 # external modules
 
 from x_transformers import Encoder, Decoder
-from x_transformers.x_transformers import PolarEmbedding
+from x_transformers.x_transformers import PolarEmbedding, Identity
 
 from x_mlps_pytorch import Feedforwards
 from x_evolution import EvoStrategy
@@ -576,8 +571,10 @@ class Transformer(Module):
 
         if isinstance(lower_body, dict):
             lower_body = Decoder(dim = dim, pre_norm_has_final_norm = False, **transformer_kwargs, **lower_body)
+
             # x_transformers passes condition into final_norm when need_condition; nn.Identity() rejects kwargs → use wrapper
-            lower_body.final_norm = _IdentityWithKwargs()
+            # remove at later date, should be fixed in latest x-transformers
+            lower_body.final_norm = Identity()
 
         if isinstance(upper_body, dict):
             upper_body = Decoder(dim = dim, **transformer_kwargs, **upper_body)
