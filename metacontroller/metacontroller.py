@@ -6,7 +6,7 @@ from collections import namedtuple
 from loguru import logger
 
 import torch
-from torch import nn, cat, stack, tensor, Tensor
+from torch import nn, cat, stack, tensor, is_tensor, Tensor
 from torch.nn import Module, GRU, Linear, Identity
 
 import torch.nn.functional as F
@@ -677,7 +677,8 @@ class Transformer(Module):
         return_meta_controller_output = False,
         return_residual_stream = False,
         return_action_logits = False,
-        condition = None
+        condition = None,
+        return_embed = False
     ):
         device = state.device
 
@@ -723,6 +724,7 @@ class Transformer(Module):
             # actions
 
             target_actions = actions
+            actions = actions[:, :-1]
 
             # masking
 
@@ -752,11 +754,15 @@ class Transformer(Module):
             action_embed = 0.
 
             if exists(actions) and exists(self.action_embed):
+                action_embed = self.action_embed(actions)
 
-                action_embed = self.action_embed(actions[:, :-1])
+            if is_tensor(action_embed) and action_embed.shape[1] == (seq_len - 1):
                 action_embed = pad_left_at_dim(action_embed, 1, dim = 1)
 
             embed = state_embed + action_embed
+
+            if return_embed:
+                return embed
 
             residual_stream, next_lower_hiddens = self.lower_body(
                 embed,
@@ -795,9 +801,6 @@ class Transformer(Module):
         # maybe return behavior cloning loss
 
         if behavioral_cloning:
-            maybe_detach_target_state = torch.detach if self.state_loss_detach_target_state else identity
-
-            loss_mask = maybe(lens_to_mask)(episode_lens, state.shape[1])
 
             # state
 

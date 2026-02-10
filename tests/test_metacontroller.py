@@ -229,3 +229,54 @@ def test_metacontroller(
     Path('./trained.pt').unlink()
 
     rmtree(test_folder, ignore_errors = True)
+
+def test_transformer_embed_parity():
+    dim_model = 512
+    dim_meta = 256
+    dim_latent = 128
+    seq_len = 10
+    batch = 1
+
+    model = Transformer(
+        dim = dim_model,
+        action_embed_readout = dict(num_continuous = 8),
+        state_embed_readout = dict(num_continuous = 384),
+        lower_body = dict(depth = 1),
+        upper_body = dict(depth = 1),
+        meta_controller = MetaController(
+            dim_model = dim_model,
+            dim_meta_controller = dim_meta,
+            dim_latent = dim_latent
+        )
+    )
+
+    state = torch.randn(batch, seq_len, 384)
+    actions = torch.randn(batch, seq_len, 8)
+
+    bc_embeds = model(state, actions, force_behavior_cloning = True, return_embed = True)
+
+    discovery_embeds = model(state, actions, discovery_phase = True, return_embed = True)
+
+    sequential_embeds = []
+
+    states = state.unbind(dim = 1)
+    past_actions = [None, *actions[:, :-1].unbind(dim = 1)]
+
+    for t_state, t_past_action in zip(states, past_actions):
+        t_state = rearrange(t_state, 'b d -> b 1 d')
+
+        if exists(t_past_action):
+            t_past_action = rearrange(t_past_action, 'b d -> b 1 d')
+
+        embed_t = model(
+            t_state,
+            actions = t_past_action,
+            return_embed = True
+        )
+
+        sequential_embeds.append(embed_t)
+
+    sequential_embeds = cat(sequential_embeds, dim = 1)
+
+    assert torch.allclose(bc_embeds, discovery_embeds, atol = 1e-6)
+    assert torch.allclose(bc_embeds, sequential_embeds, atol = 1e-6)
