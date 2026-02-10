@@ -142,7 +142,7 @@ class TextSamplerDataset(Dataset):
 def train(
     num_bc_batches = 5000,
     num_discovery_batches = 5000,
-    discovery_warmup_steps = 0,
+    discovery_warmup_steps = 100,
     batch_size = 4,
     grad_accum_every = 4,
     learning_rate = 1e-4,
@@ -152,7 +152,7 @@ def train(
     discovery_state_loss_weight = 1.,
     discovery_action_loss_weight = 1.,
     discovery_kl_loss_weight = 0.1,
-    discovery_entropy_loss_weight = 0.75,
+    discovery_entropy_loss_weight = 0.,
     ratio_loss_weight = 1.,
     validate_every = 100,
     generate_every = 250,
