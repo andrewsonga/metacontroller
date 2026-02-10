@@ -18,8 +18,10 @@ import numpy as np
 from pathlib import Path
 
 import torch
+from torch import Tensor
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
+
 from accelerate import Accelerator
 from einops import rearrange
 
@@ -47,6 +49,9 @@ def cycle(loader):
         for data in loader:
             yield data
 
+def divisible_by(num, den):
+    return (num % den) == 0
+
 def decode_token(token):
     return str(chr(max(32, token)))
 
@@ -58,40 +63,47 @@ def decode_tokens(tokens):
 @torch.no_grad()
 def sample(
     model,
-    prompt: torch.Tensor,
+    prompt: Tensor,
     seq_len: int,
     temperature = 1.,
-    discovery_phase = False
 ):
     model.eval()
-    device = prompt.device
-    out = prompt.clone()
+
     prompt_seq_len = prompt.shape[-1]
     sample_num_times = max(0, seq_len - prompt_seq_len)
 
-    cache = None
+    state = prompt
+    action = prompt[:, 1:]
+
+    (action_dist, _), cache = model(
+        state = state,
+        actions = action,
+        return_cache = True,
+        return_state_action_cache = True,
+        force_behavior_cloning = True
+    )
+
+    next_action = next_state = model.action_readout.sample(action_dist[:, -1:], temperature = temperature)
+
+    state = torch.cat((state, next_state), dim = -1)
 
     for _ in range(sample_num_times):
-        curr_state = out[:, -1:]
-        curr_actions = out[:, -1:] 
 
-        logits, next_cache = model(
-            state = curr_state,
-            actions = curr_actions,
+        (action_dist, _), next_cache = model(
+            state = state[:, -1:],
+            actions = state[:, -1:],
             cache = cache,
-            return_cache = True,
-            discovery_phase = discovery_phase,
-            force_behavior_cloning = not discovery_phase
+            return_state_action_cache = True,
+            force_behavior_cloning = True
         )
 
-        logits = logits[:, -1:]
+        next_state = model.action_readout.sample(action_dist[:, -1:], temperature = temperature)
+
+        state = torch.cat((state, next_state), dim = -1)
+
         cache = next_cache
 
-        sample = model.action_readout.sample(logits, temperature = temperature)
-
-        out = torch.cat((out, sample), dim = -1)
-
-    return out[:, prompt_seq_len:]
+    return state[:, prompt_seq_len:]
 
 # accelerator
 
@@ -139,8 +151,8 @@ model = Transformer(
     dim = 512,
     state_embed_readout = dict(num_discrete = 256),
     action_embed_readout = dict(num_discrete = 256),
-    lower_body = dict(depth = 3, heads = 8, attn_dim_head = 64),
-    upper_body = dict(depth = 3, heads = 8, attn_dim_head = 64),
+    lower_body = dict(depth = 3, heads = 8, attn_dim_head = 48),
+    upper_body = dict(depth = 3, heads = 8, attn_dim_head = 48),
     meta_controller = meta_controller
 )
 
@@ -201,7 +213,7 @@ for i in pbar:
         accelerator.backward(loss / GRAD_ACCUM_EVERY)
         total_loss += loss.item()
 
-    if i % 10 == 0:
+    if divisible_by(i, 10):
         phase = 'discovering' if is_discovering else 'cloning'
         action_loss_key = 'action_recon_loss' if is_discovering else 'action_loss'
 
@@ -214,10 +226,11 @@ for i in pbar:
     optim.step()
     optim.zero_grad()
 
-    if i % VALIDATE_EVERY == 0:
+    if divisible_by(i, VALIDATE_EVERY):
         model.eval()
         with torch.no_grad():
             valid_data = next(val_loader)
+
             tokens = valid_data
             state = tokens[:, :-1]
             actions = tokens[:, 1:]
@@ -236,16 +249,16 @@ for i in pbar:
 
             accelerator.print(f"{i}: validation loss: {loss.item():.3f}")
 
-    if i % GENERATE_EVERY == 0:
+    if not is_discovering and divisible_by(i, GENERATE_EVERY):
         model.eval()
         inp = random.choice(val_dataset)[:PRIME_LENGTH]
         inp = inp.to(accelerator.device)
 
         prime = decode_tokens(inp)
-        accelerator.print(f"\nINPUT: {prime}")
+        accelerator.print(f"\n\nINPUT: {prime}")
 
         prompt = inp[None, ...]
-        sampled = sample(model, prompt, GENERATE_LENGTH, discovery_phase = is_discovering)
+        sampled = sample(model, prompt, GENERATE_LENGTH)
         
         output = decode_tokens(sampled[0])
-        accelerator.print(f"\nOUTPUT: {output}\n")
+        accelerator.print(f"\n\nOUTPUT: {output}\n")

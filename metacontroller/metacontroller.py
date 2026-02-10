@@ -673,6 +673,7 @@ class Transformer(Module):
         return_raw_action_dist = False,
         return_latents = False,
         return_cache = False,
+        return_state_action_cache = False,
         episode_lens: Tensor | None = None,
         return_meta_controller_output = False,
         return_residual_stream = False,
@@ -729,7 +730,9 @@ class Transformer(Module):
             # actions
 
             target_actions = actions
-            actions = actions[:, :-1]
+
+            if seq_len == actions.shape[1]:
+                actions = actions[:, :-1]
 
             # masking
 
@@ -797,13 +800,28 @@ class Transformer(Module):
 
             dist_params = self.action_readout(attended)
 
+        # if behavior or discovery, calculate state prediction
+
+        if behavioral_cloning or discovery_phase:
+            state_dist_params = self.state_readout(attended[:, :-1])
+
+        # caching related
+
+        next_cache_steps = cache_steps + seq_len
+        return_cache_value = TransformerOutput(residual_stream, Hiddens(next_lower_hiddens, next_meta_hiddens, next_upper_hiddens), next_cache_steps)
+
+        # maybe early return action and state dist with cache, for char lm
+        # cleanup all the returns later
+
+        if return_state_action_cache:
+            return (dist_params, state_dist_params), return_cache_value
+
         # maybe return behavior cloning loss
 
-        if behavioral_cloning and not is_single_token:
+        if behavioral_cloning:
 
             # state
 
-            state_dist_params = self.state_readout(attended[:, :-1])
             state_clone_loss = self.state_readout.calculate_loss(state_dist_params, target_state, mask = state_loss_mask)
 
             # action
@@ -831,11 +849,10 @@ class Transformer(Module):
 
             return losses, next_meta_hiddens
 
-        elif discovery_phase and not is_single_token:
+        elif discovery_phase:
 
             # state
 
-            state_dist_params = self.state_readout(attended[:, :-1])
             state_clone_loss = self.state_readout.calculate_loss(state_dist_params, target_state, mask = state_loss_mask)
 
             # action
@@ -852,10 +869,6 @@ class Transformer(Module):
         # returning
 
         return_one = not (return_latents or return_cache)
-
-        if return_cache:
-            next_cache_steps = cache_steps + seq_len
-            return_cache_value = TransformerOutput(residual_stream, Hiddens(next_lower_hiddens, next_meta_hiddens, next_upper_hiddens), next_cache_steps)
 
         if return_one:
             return dist_params
