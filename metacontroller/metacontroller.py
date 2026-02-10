@@ -557,7 +557,8 @@ class Transformer(Module):
         upper_body: Decoder | dict,
         meta_controller: MetaController | None = None,
         dim_condition = None,
-        state_loss_detach_target_state = True
+        state_loss_detach_target_state = True,
+        embed_past_actions = True
     ):
         super().__init__()
 
@@ -582,7 +583,9 @@ class Transformer(Module):
             upper_body = Decoder(dim = dim, **transformer_kwargs, **upper_body)
 
         self.state_embed, self.state_readout = EmbedAndReadout(dim, **state_embed_readout)
-        self.action_embed, self.action_readout = EmbedAndReadout(dim, **action_embed_readout)
+        action_embed, self.action_readout = EmbedAndReadout(dim, **action_embed_readout)
+
+        self.action_embed = action_embed if embed_past_actions else None
 
         self.lower_body = lower_body
         self.upper_body = upper_body
@@ -749,14 +752,12 @@ class Transformer(Module):
 
             action_embed = 0.
 
-            if exists(actions):
+            if exists(actions) and exists(self.action_embed):
                 past_actions = pad_at_dim(actions, (1, -1), dim = 1)
 
                 action_embed = self.action_embed(past_actions)
 
-            # following the paper: it doesn't make sense to use action as input to a model that's trained to predict the action
-            embed = state_embed
-            #embed = state_embed + action_embed
+            embed = state_embed + action_embed
 
             residual_stream, next_lower_hiddens = self.lower_body(
                 embed,

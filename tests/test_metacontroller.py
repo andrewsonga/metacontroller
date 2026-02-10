@@ -25,11 +25,13 @@ def exists(v):
 @param('use_binary_mapper_variant', (False, True))
 @param('accept_condition', (False, True))
 @param('action_discrete', (False, True))
+@param('embed_past_actions', (False, True))
 @param('variable_length', (False, True))
 @param('use_mingru', (False, True))
 def test_metacontroller(
     use_binary_mapper_variant,
     action_discrete,
+    embed_past_actions,
     variable_length,
     use_mingru,
     accept_condition
@@ -67,6 +69,7 @@ def test_metacontroller(
         state_embed_readout = dict(num_continuous = 384),
         lower_body = dict(depth = 2,),
         upper_body = dict(depth = 2,),
+        embed_past_actions = embed_past_actions,
         **condition_kwargs
     )
 
