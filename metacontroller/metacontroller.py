@@ -734,7 +734,9 @@ class Transformer(Module):
 
             if exists(episode_lens):
                 loss_mask = lens_to_mask(episode_lens, state.shape[1])
+
                 state_loss_mask = loss_mask[:, :-1]
+                action_loss_mask = loss_mask
 
         # positional embedding
 
