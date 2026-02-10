@@ -22,7 +22,7 @@ $ pip install metacontroller-pytorch
 
 - [Andrew Song](https://github.com/andrewsonga) for implementing linear probing and fixing an issue with the action space
 
-- [Andrew Song](https://github.com/andrewsonga) for identifying a critical issue with past action embed handling
+- [Andrew Song](https://github.com/andrewsonga) for identifying a critical issue with past action embed handling and detaching gradients of target states
 
 ## Usage
 
