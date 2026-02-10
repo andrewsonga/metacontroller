@@ -152,7 +152,7 @@ def train(
     discovery_state_loss_weight = 1.,
     discovery_action_loss_weight = 1.,
     discovery_kl_loss_weight = 0.1,
-    discovery_entropy_loss_weight = 0.1,
+    discovery_entropy_loss_weight = 0.75,
     ratio_loss_weight = 1.,
     validate_every = 100,
     generate_every = 250,
