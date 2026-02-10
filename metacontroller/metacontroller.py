@@ -710,9 +710,14 @@ class Transformer(Module):
 
         cache_steps = cache.cache_steps if exists(cache) else 0
 
-        # handle maybe behavioral cloning
+        seq_len = state.shape[1]
+        is_single_token = seq_len == 1
 
-        if behavioral_cloning or discovery_phase: # during behavior cloning and discovery phase, the network is predicting / reconstructing the next token
+        if (behavioral_cloning or discovery_phase) and is_single_token:
+            assert exists(cache) or return_cache, 'behavioral cloning or discovery phase must be used with sequences of length > 1 if not doing inference (caching)'
+
+        if (behavioral_cloning or discovery_phase) and not is_single_token:
+            # during behavior cloning and discovery phase, the network is predicting / reconstructing the next token
 
             assert exists(actions), f'`actions` cannot be empty when doing discovery or behavioral cloning'
 
@@ -736,12 +741,6 @@ class Transformer(Module):
 
                 state_loss_mask = loss_mask[:, :-1]
                 action_loss_mask = loss_mask
-
-        # positional embedding
-
-        seq_len = state.shape[1]
-
-        pos = torch.arange(seq_len, device = device)
 
         # transformer lower body
 
@@ -800,7 +799,7 @@ class Transformer(Module):
 
         # maybe return behavior cloning loss
 
-        if behavioral_cloning:
+        if behavioral_cloning and not is_single_token:
 
             # state
 
@@ -832,7 +831,7 @@ class Transformer(Module):
 
             return losses, next_meta_hiddens
 
-        elif discovery_phase:
+        elif discovery_phase and not is_single_token:
 
             # state
 
