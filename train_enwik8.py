@@ -112,8 +112,6 @@ accelerator = Accelerator()
 # dataset
 
 data_path = Path("./data/enwik8.gz")
-if not data_path.exists():
-    data_path = Path("/Users/philwang/dl/metacontroller/data/enwik8.gz")
 
 with gzip.open(str(data_path)) as file:
     data = np.frombuffer(file.read(int(95e6)), dtype=np.uint8).copy()
