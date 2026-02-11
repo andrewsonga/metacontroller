@@ -33,7 +33,7 @@ from einops import rearrange
 import matplotlib.pyplot as plt
 import wandb
 
-from metacontroller import MetaController, Transformer
+from metacontroller import MetaController, Transformer, binary_entropy
 from metacontroller.transformer_with_resnet import TransformerWithResnet
 
 from babyai_env import get_mission_embedding
@@ -145,6 +145,8 @@ def train(
     discovery_action_recon_loss_weight = 1.,
     discovery_obs_loss_weight = 1e-3,
     discovery_kl_loss_weight = 0.05,
+    discovery_entropy_loss_weight = 0.1,
+    discovery_negative_entropy_loss_weight = 0.75,
     discovery_ratio_loss_weight = 1.0,
     discovery_switch_warmup_steps = 1,
     discovery_switch_lr_scale = 0.1,
@@ -348,10 +350,22 @@ def train(
                 if is_discovering:
                     obs_loss, action_recon_loss, kl_loss, ratio_loss = losses
 
+                    entropy_loss = binary_entropy(meta_controller_output.switch_beta).mean()
+
+                    # dynamic entropy weight
+                    # if density is 0, apply negative entropy weight to push switch betas towards 0.5
+                    
+                    last_hard_switch_density = (meta_controller_output.switch_beta > 0.5).float().mean().item()
+
+                    entropy_weight = discovery_entropy_loss_weight
+                    if last_hard_switch_density == 0:
+                        entropy_weight = -discovery_negative_entropy_loss_weight
+
                     loss = (
                         obs_loss * discovery_obs_loss_weight + 
                         action_recon_loss * discovery_action_recon_loss_weight +
                         kl_loss * discovery_kl_loss_weight +
+                        entropy_loss * entropy_weight +
                         ratio_loss * discovery_ratio_loss_weight
                     )
 
@@ -364,8 +378,9 @@ def train(
                         obs_loss = obs_loss.item(),
                         action_recon_loss = action_recon_loss.item(),
                         kl_loss = kl_loss.item(),
+                        entropy_loss = entropy_loss.item(),
                         ratio_loss = ratio_loss.item(),
-                        switch_density = meta_controller_output.switch_beta.mean().item(),
+                        hard_switch_density = last_hard_switch_density,
                         switch_lr_warmup = warmup_factor,
                     )
                 else:
