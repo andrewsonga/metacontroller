@@ -85,6 +85,7 @@ class MetaControllerWithBinaryMapper(Module):
         switch_temperature = 0.1,
         target_temporal_segment_len = 4, # set to target segment length driven by ratio loss
         ratio_loss_weight = 1.,
+        dim_sequence_summary_embed = 32,
         hard_switch = None
     ):
         super().__init__()
@@ -93,11 +94,15 @@ class MetaControllerWithBinaryMapper(Module):
 
         dim_meta = default(dim_meta_controller, dim_model)
 
+        self.summary_gru = GRU(dim_model, dim_model)
+
         self.model_to_meta = Linear(dim_model, dim_meta)
 
-        self.bidirectional_temporal_encoder = Encoder(dim = dim_meta, **bidirectional_temporal_encoder_kwargs)
+        self.internal_sequence_embedder = Encoder(dim = dim_model, **bidirectional_temporal_encoder_kwargs)
 
-        self.emitter = GRU(dim_meta * 2, dim_meta * 2)
+        self.to_sequence_summary_embed = Linear(dim_model, dim_sequence_summary_embed)
+
+        self.emitter = GRU(dim_meta + dim_model + dim_sequence_summary_embed, dim_meta * 2)
         self.emitter_to_binary_logits = Linear(dim_meta * 2, dim_code_bits)
 
         # internal rl phase substitutes the acausal + emitter with a causal ssm
@@ -105,13 +110,13 @@ class MetaControllerWithBinaryMapper(Module):
 
         if isinstance(action_proposer, dict):
             action_proposer = ActionProposerWrapper(
-                Decoder(dim = dim_meta, **action_proposer),
+                Decoder(dim = dim_model, **action_proposer),
                 cache_key = 'cache',
                 return_cache_key = 'return_hiddens'
             )
 
         self.action_proposer = action_proposer
-        self.proposer_to_binary_logits = Linear(dim_meta, dim_code_bits)
+        self.proposer_to_binary_logits = Linear(dim_model, dim_code_bits)
 
         # binary mapper
         # proposed in https://arxiv.org/abs/2510.17558 as a more stable alternative to VAE by François Fleuret
@@ -126,7 +131,7 @@ class MetaControllerWithBinaryMapper(Module):
 
         # switching unit
 
-        self.switching_unit = GRU(dim_meta + self.num_codes, dim_meta)
+        self.switching_unit = GRU(dim_model + dim_meta + self.num_codes, dim_meta)
 
         self.to_switching_unit_beta = nn.Linear(dim_meta, 1, bias = False)
 
@@ -171,8 +176,10 @@ class MetaControllerWithBinaryMapper(Module):
 
     def discovery_parameters(self):
         return [
+            *self.summary_gru.parameters(),
             *self.model_to_meta.parameters(),
-            *self.bidirectional_temporal_encoder.parameters(),
+            *self.internal_sequence_embedder.parameters(),
+            *self.to_sequence_summary_embed.parameters(),
             *self.emitter.parameters(),
             *self.emitter_to_binary_logits.parameters(),
             *self.binary_mapper.parameters(),
@@ -199,9 +206,7 @@ class MetaControllerWithBinaryMapper(Module):
         self,
         residual_stream
     ):
-        meta_embed = self.model_to_meta(residual_stream)
-
-        proposed_action_hidden, _ = self.action_proposer(meta_embed)
+        proposed_action_hidden, _ = self.action_proposer(residual_stream)
 
         return self.proposer_to_binary_logits(proposed_action_hidden)
 
@@ -233,17 +238,34 @@ class MetaControllerWithBinaryMapper(Module):
         temperature = 1.,
         episode_lens: Tensor | None = None
     ):
+        seq_len = residual_stream.shape[1]
         device = residual_stream.device
 
         # destruct prev cache
 
-        prev_action_proposer_hidden, prev_switching_unit_gru_hidden, prev_switch_gated_hiddens, prev_sampled_code = cache.prev_hiddens if exists(cache) else ((None,) * 4)
+        prev_summarized, prev_action_proposer_hidden, prev_switching_unit_gru_hidden, prev_switch_gated_hiddens, prev_sampled_code = cache.prev_hiddens if exists(cache) else ((None,) * 5)
 
         # getting proposed action for the two phases
 
         next_action_proposer_hidden = None
 
-        meta_embed = self.model_to_meta(residual_stream)
+        # summarizing the input residual stream, then projecting it to meta controller dimension
+
+        summarized, next_summarized = self.summary_gru(residual_stream, prev_summarized)
+
+        meta_embed = self.model_to_meta(summarized)
+
+        # construct meta embed (projected summarized) with a previous, so it can be used for emitter and switching unit
+
+        if not exists(prev_summarized):
+            prev_summarized = torch.zeros_like(next_summarized)
+
+        prev_summarized = rearrange(prev_summarized, 'n b d -> b n d')
+
+        meta_embed_prev = cat((
+            self.model_to_meta(prev_summarized),
+            meta_embed[:, :-1]
+        ), dim = 1)
 
         hard_switch = default(hard_switch, self.hard_switch, not discovery_phase) # think during internal RL phase, it needs to be a hard switch, then only the actions emitted during the switch is reinforced
 
@@ -254,15 +276,27 @@ class MetaControllerWithBinaryMapper(Module):
 
             mask = maybe(lens_to_mask)(episode_lens, meta_embed.shape[1])
 
-            encoded_temporal = self.bidirectional_temporal_encoder(meta_embed, mask = mask)
+            encoded_temporal = self.internal_sequence_embedder(residual_stream, mask = mask)
 
-            proposed_action_hidden, _ = self.emitter(cat((encoded_temporal, meta_embed), dim = -1))
+            mean_pooled = masked_mean(encoded_temporal, mask, dim = 1)
+
+            summarized_sequence_embed = self.to_sequence_summary_embed(mean_pooled)
+
+            summarized_sequence_embed = repeat(summarized_sequence_embed, 'b d -> b n d', n = seq_len)
+
+            emitter_input = cat((
+                residual_stream,
+                meta_embed_prev,
+                summarized_sequence_embed
+            ), dim = -1)
+
+            proposed_action_hidden, _ = self.emitter(emitter_input)
             to_logits = self.emitter_to_binary_logits
 
         else: # else internal rl phase
 
             proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(
-                meta_embed,
+                residual_stream,
                 cache = prev_action_proposer_hidden
             )
 
@@ -295,7 +329,7 @@ class MetaControllerWithBinaryMapper(Module):
             assert seq_len == 1, 'inference RL phase must be done one token at a time - if replaying for policy optimization, please use `get_action_dist_for_internal_rl`'
             z_prev = prev_sampled_code
 
-        switch_input = torch.cat((meta_embed, z_prev), dim=-1)
+        switch_input = torch.cat((residual_stream, meta_embed_prev, z_prev), dim=-1)
 
         switching_unit_gru_out, next_switching_unit_gru_hidden = self.switching_unit(
             switch_input, 
@@ -364,6 +398,7 @@ class MetaControllerWithBinaryMapper(Module):
         # returning
 
         next_hiddens = (
+            next_summarized,
             next_action_proposer_hidden,
             next_switching_unit_gru_hidden,
             next_switch_gated_codes,
