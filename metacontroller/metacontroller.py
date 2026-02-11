@@ -575,7 +575,8 @@ class MetaController(Module):
                 - 1.
             ))
 
-            kl_loss = kl_loss.sum(dim = -1).mean()
+            kl_loss = reduce(kl_loss, 'b n d -> b n', 'sum')
+            kl_loss = masked_mean(kl_loss, mask)
 
         # maybe hard switch
 

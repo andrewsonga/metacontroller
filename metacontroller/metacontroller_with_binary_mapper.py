@@ -459,7 +459,7 @@ class MetaControllerWithBinaryMapper(Module):
         if discovery_phase:
             # weight unreduced kl loss by switch gates
 
-            kl_loss = kl_loss.sum(dim = -1).mean()
+            kl_loss = masked_mean(kl_loss, mask)
 
         else:
             kl_loss = self.zero
