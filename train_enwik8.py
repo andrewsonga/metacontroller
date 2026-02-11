@@ -152,7 +152,8 @@ def train(
     discovery_state_loss_weight = 1.,
     discovery_action_loss_weight = 1.,
     discovery_kl_loss_weight = 0.1,
-    discovery_entropy_loss_weight = 0.,
+    discovery_entropy_loss_weight = 0.75,
+    discovery_negative_entropy_loss_weight = 0.,
     ratio_loss_weight = 1.,
     validate_every = 100,
     generate_every = 250,
@@ -194,7 +195,7 @@ Grad Accum Every:   {grad_accum_every}
 BC Learning Rate:   {learning_rate}
 Disc Learning Rate: {discovery_learning_rate}
 BC Loss Weights:    state: {bc_state_loss_weight} action: {bc_action_loss_weight}
-Disc Loss Weights:  state: {discovery_state_loss_weight} action: {discovery_action_loss_weight} kl: {discovery_kl_loss_weight} entropy: {discovery_entropy_loss_weight} ratio: {ratio_loss_weight}
+Disc Loss Weights:  state: {discovery_state_loss_weight} action: {discovery_action_loss_weight} kl: {discovery_kl_loss_weight} entropy: {discovery_entropy_loss_weight} neg_entropy: {discovery_negative_entropy_loss_weight} ratio: {ratio_loss_weight}
 Seq Len:            {seq_len}
 CPU:                {cpu}
 Model Dim:          {dim}
@@ -347,10 +348,19 @@ Checkpoint Path:    {checkpoint_path}
                 
                 entropy_loss = binary_entropy(meta_output.switch_beta).mean()
 
+                # dynamic entropy weight
+                # if density is 0, apply negative entropy weight to push switch betas towards 0.5
+
+                switch_density = (meta_output.switch_beta > 0.5).float().mean()
+
+                entropy_weight = discovery_entropy_loss_weight
+                if switch_density == 0:
+                    entropy_weight = -discovery_negative_entropy_loss_weight
+
                 loss = (action_recon_loss + 0.5) * discovery_action_loss_weight + \
                        (obs_loss + 0.5) * discovery_state_loss_weight + \
                        kl_loss * discovery_kl_loss_weight + \
-                       entropy_loss * discovery_entropy_loss_weight + \
+                       entropy_loss * entropy_weight + \
                        ratio_loss
                 
                 last_state_loss = obs_loss.item()
