@@ -283,13 +283,13 @@ class MetaController(Module):
             # default to Decoder, wrapped for standard interface
 
             action_proposer = ActionProposerWrapper(
-                Decoder(dim = dim_meta, **action_proposer),
+                Decoder(dim = dim_model, **action_proposer),
                 cache_key = 'cache',
                 return_cache_key = 'return_hiddens'
             )
 
         self.action_proposer = action_proposer
-        self.action_proposer_mean_log_var = Readout(dim_meta, num_continuous = dim_latent)
+        self.action_proposer_mean_log_var = Readout(dim_model, num_continuous = dim_latent)
 
         # switching unit
 
@@ -388,11 +388,8 @@ class MetaController(Module):
         self,
         residual_stream
     ):
-        summarized, _ = self.summary_gru(residual_stream)
 
-        meta_embed = self.model_to_meta(summarized)
-
-        proposed_action_hidden, _ = self.action_proposer(meta_embed)
+        proposed_action_hidden, _ = self.action_proposer(residual_stream)
 
         return self.action_proposer_mean_log_var(proposed_action_hidden)
 
@@ -476,7 +473,7 @@ class MetaController(Module):
         else: # else internal rl phase
 
             proposed_action_hidden, next_action_proposer_hidden = self.action_proposer(
-                meta_embed,
+                residual_stream,
                 cache = prev_action_proposer_hidden
             )
 
