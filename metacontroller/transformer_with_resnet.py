@@ -196,6 +196,7 @@ class TransformerWithResnet(Transformer):
         resnet_type = 'resnet18',
         is_channel_last = True,
         use_layernorm = False,
+        norm_final_encoding = False,
         encoder_kwargs: dict | None = None,
         **kwargs
     ):
@@ -210,6 +211,8 @@ class TransformerWithResnet(Transformer):
 
         self.resnet_dim = kwargs['state_embed_readout']['num_continuous']
         self.visual_encoder = resnet_klass(num_classes = self.resnet_dim, use_layernorm = use_layernorm)
+
+        self.final_norm = nn.LayerNorm(self.resnet_dim) if norm_final_encoding else nn.Identity()
 
         self.attn = None
         if exists(encoder_kwargs):
@@ -229,5 +232,7 @@ class TransformerWithResnet(Transformer):
         x, inverse = pack_with_inverse(x, '* c h w')
 
         h = self.visual_encoder(x, attn = self.attn)
+
+        h = self.final_norm(h)
 
         return inverse(h, '* d')
